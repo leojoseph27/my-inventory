@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production bash start.sh",
-    "lint": "eslint ."
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "eslint .",
+    "db:push": "echo 'Using Supabase - no local database push needed'"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
