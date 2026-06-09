@@ -1,9 +1,10 @@
-import { db } from '@/lib/db';
 import { NextRequest, NextResponse } from 'next/server';
+import { createAdminClient } from '@/utils/supabase/server';
 import { createHash } from 'crypto';
 
 export async function POST(request: NextRequest) {
   try {
+    const supabase = createAdminClient();
     const body = await request.json();
     const { email, password } = body;
 
@@ -11,20 +12,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Email and password are required' }, { status: 400 });
     }
 
-    const user = await db.adminUser.findUnique({ where: { email } });
-    if (!user) {
+    const { data: user, error } = await supabase
+      .from('admin_users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (error || !user) {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
     }
 
     const hashedPassword = createHash('sha256').update(password).digest('hex');
-    if (user.password !== hashedPassword) {
+    if ((user as any).password !== hashedPassword) {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
     }
 
     return NextResponse.json({
-      id: user.id,
-      email: user.email,
-      name: user.name,
+      id: (user as any).id,
+      email: (user as any).email,
+      name: (user as any).name,
     });
   } catch (error) {
     console.error('Error logging in:', error);

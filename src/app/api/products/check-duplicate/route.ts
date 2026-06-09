@@ -1,8 +1,10 @@
-import { db } from '@/lib/db';
 import { NextRequest, NextResponse } from 'next/server';
+import { createAdminClient } from '@/utils/supabase/server';
+import { mapProductFromDb } from '@/utils/supabase/mappers';
 
 export async function GET(request: NextRequest) {
   try {
+    const supabase = createAdminClient();
     const { searchParams } = new URL(request.url);
     const ndNumber = searchParams.get('ndNumber') || '';
     const barcode = searchParams.get('barcode') || '';
@@ -11,26 +13,48 @@ export async function GET(request: NextRequest) {
     const duplicates: { ndNumber?: any; barcode?: any } = {};
 
     if (ndNumber) {
-      const existing = await db.product.findFirst({
-        where: {
-          ndNumber,
-          ...(excludeId ? { id: { not: excludeId } } : {}),
-        },
-      });
-      if (existing) {
-        duplicates.ndNumber = { id: existing.id, sr: existing.sr, englishDescription: existing.englishDescription, ndNumber: existing.ndNumber };
+      let query = supabase
+        .from('products')
+        .select('id, sr, english_description, nd_number')
+        .eq('nd_number', ndNumber)
+        .limit(1);
+
+      if (excludeId) {
+        query = query.neq('id', excludeId);
+      }
+
+      const { data } = await query;
+      if (data && data.length > 0) {
+        const row = data[0];
+        duplicates.ndNumber = {
+          id: row.id,
+          sr: row.sr,
+          englishDescription: row.english_description,
+          ndNumber: row.nd_number,
+        };
       }
     }
 
     if (barcode) {
-      const existing = await db.product.findFirst({
-        where: {
-          barcode,
-          ...(excludeId ? { id: { not: excludeId } } : {}),
-        },
-      });
-      if (existing) {
-        duplicates.barcode = { id: existing.id, sr: existing.sr, englishDescription: existing.englishDescription, barcode: existing.barcode };
+      let query = supabase
+        .from('products')
+        .select('id, sr, english_description, barcode')
+        .eq('barcode', barcode)
+        .limit(1);
+
+      if (excludeId) {
+        query = query.neq('id', excludeId);
+      }
+
+      const { data } = await query;
+      if (data && data.length > 0) {
+        const row = data[0];
+        duplicates.barcode = {
+          id: row.id,
+          sr: row.sr,
+          englishDescription: row.english_description,
+          barcode: row.barcode,
+        };
       }
     }
 

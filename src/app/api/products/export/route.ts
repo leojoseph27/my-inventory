@@ -1,13 +1,20 @@
-import { db } from '@/lib/db';
 import { NextResponse } from 'next/server';
+import { createAdminClient } from '@/utils/supabase/server';
 import * as XLSX from 'xlsx';
 
 export async function GET() {
   try {
-    const products = await db.product.findMany({
-      include: { images: { orderBy: { displayOrder: 'asc' } } },
-      orderBy: { sr: 'asc' },
-    });
+    const supabase = createAdminClient();
+
+    const { data, error } = await supabase
+      .from('products')
+      .select('*, product_images(*)')
+      .order('sr', { ascending: true, nullsFirst: true });
+
+    if (error) {
+      console.error('Supabase error exporting products:', error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
 
     const parseJsonArray = (value: string | null): string => {
       if (!value) return '';
@@ -20,11 +27,11 @@ export async function GET() {
       }
     };
 
-    const rows = products.map((p) => ({
+    const rows = (data || []).map((p: any) => ({
       'Sr': p.sr ?? '',
-      'English Description': p.englishDescription ?? '',
-      'Arabic Description': p.arabicDescription ?? '',
-      'ND Number': p.ndNumber ?? '',
+      'English Description': p.english_description ?? '',
+      'Arabic Description': p.arabic_description ?? '',
+      'ND Number': p.nd_number ?? '',
       'Barcode': p.barcode ?? '',
       'Colour': parseJsonArray(p.colours),
       'L': p.length ?? '',
@@ -32,7 +39,7 @@ export async function GET() {
       'H': p.height ?? '',
       'Made': p.made ?? '',
       'Material': parseJsonArray(p.materials),
-      'Additional Info': parseJsonArray(p.additionalInfo),
+      'Additional Info': parseJsonArray(p.additional_info),
       'Price': p.price ?? '',
       'Pcs': p.pcs ?? '',
     }));
@@ -41,22 +48,10 @@ export async function GET() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Products');
 
-    // Set column widths
     worksheet['!cols'] = [
-      { wch: 6 },   // Sr
-      { wch: 30 },  // English Description
-      { wch: 30 },  // Arabic Description
-      { wch: 12 },  // ND Number
-      { wch: 18 },  // Barcode
-      { wch: 20 },  // Colour
-      { wch: 8 },   // L
-      { wch: 8 },   // W
-      { wch: 8 },   // H
-      { wch: 12 },  // Made
-      { wch: 20 },  // Material
-      { wch: 25 },  // Additional Info
-      { wch: 10 },  // Price
-      { wch: 6 },   // Pcs
+      { wch: 6 }, { wch: 30 }, { wch: 30 }, { wch: 12 }, { wch: 18 },
+      { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 12 },
+      { wch: 20 }, { wch: 25 }, { wch: 10 }, { wch: 6 },
     ];
 
     const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });

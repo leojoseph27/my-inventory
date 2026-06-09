@@ -1,7 +1,6 @@
-import { db } from '@/lib/db';
 import { NextRequest, NextResponse } from 'next/server';
-import { unlinkSync, existsSync } from 'fs';
-import { join } from 'path';
+import { createAdminClient } from '@/utils/supabase/server';
+import { mapProductFromDb, mapProductToDb } from '@/utils/supabase/mappers';
 
 export async function GET(
   request: NextRequest,
@@ -9,16 +8,19 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const product = await db.product.findUnique({
-      where: { id },
-      include: { images: { orderBy: { displayOrder: 'asc' } } },
-    });
+    const supabase = createAdminClient();
 
-    if (!product) {
+    const { data, error } = await supabase
+      .from('products')
+      .select('*, product_images(*)')
+      .eq('id', id)
+      .single();
+
+    if (error || !data) {
       return NextResponse.json({ error: 'Product not found' }, { status: 404 });
     }
 
-    return NextResponse.json(product);
+    return NextResponse.json(mapProductFromDb(data));
   } catch (error) {
     console.error('Error fetching product:', error);
     return NextResponse.json({ error: 'Failed to fetch product' }, { status: 500 });
@@ -31,30 +33,39 @@ export async function PUT(
 ) {
   try {
     const { id } = await params;
+    const supabase = createAdminClient();
     const body = await request.json();
 
-    const product = await db.product.update({
-      where: { id },
-      data: {
-        sr: body.sr ?? null,
-        englishDescription: body.englishDescription || null,
-        arabicDescription: body.arabicDescription || null,
-        ndNumber: body.ndNumber || null,
-        barcode: body.barcode || null,
-        colours: body.colours ? JSON.stringify(body.colours) : null,
-        length: body.length ?? null,
-        width: body.width ?? null,
-        height: body.height ?? null,
-        made: body.made || null,
-        materials: body.materials ? JSON.stringify(body.materials) : null,
-        additionalInfo: body.additionalInfo ? JSON.stringify(body.additionalInfo) : null,
-        price: body.price ?? null,
-        pcs: body.pcs ?? null,
-      },
-      include: { images: { orderBy: { displayOrder: 'asc' } } },
+    const dbData = mapProductToDb({
+      sr: body.sr ?? null,
+      englishDescription: body.englishDescription || null,
+      arabicDescription: body.arabicDescription || null,
+      ndNumber: body.ndNumber || null,
+      barcode: body.barcode || null,
+      colours: body.colours ? JSON.stringify(body.colours) : null,
+      length: body.length ?? null,
+      width: body.width ?? null,
+      height: body.height ?? null,
+      made: body.made || null,
+      materials: body.materials ? JSON.stringify(body.materials) : null,
+      additionalInfo: body.additionalInfo ? JSON.stringify(body.additionalInfo) : null,
+      price: body.price ?? null,
+      pcs: body.pcs ?? null,
     });
 
-    return NextResponse.json(product);
+    const { data, error } = await supabase
+      .from('products')
+      .update(dbData)
+      .eq('id', id)
+      .select('*, product_images(*)')
+      .single();
+
+    if (error) {
+      console.error('Supabase error updating product:', error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json(mapProductFromDb(data));
   } catch (error) {
     console.error('Error updating product:', error);
     return NextResponse.json({ error: 'Failed to update product' }, { status: 500 });
@@ -67,31 +78,48 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+    const supabase = createAdminClient();
 
-    // Get product images to delete files
-    const product = await db.product.findUnique({
-      where: { id },
-      include: { images: true },
-    });
+    // First get the product to find its images for storage cleanup
+    const { data: product } = await supabase
+      .from('products')
+      .select('*, product_images(*)')
+      .eq('id', id)
+      .single();
 
     if (!product) {
       return NextResponse.json({ error: 'Product not found' }, { status: 404 });
     }
 
-    // Delete image files
-    for (const image of product.images) {
-      try {
-        const filePath = join(process.cwd(), 'upload', 'products', image.imageUrl.split('/').pop() || '');
-        if (existsSync(filePath)) {
-          unlinkSync(filePath);
+    // Delete images from Supabase Storage
+    if (product.product_images && product.product_images.length > 0) {
+      const filePaths = product.product_images.map((img: any) => {
+        const url = new URL(img.image_url);
+        const pathParts = url.pathname.split('/');
+        return pathParts.slice(pathParts.indexOf('product-images') + 1).join('/');
+      }).filter(Boolean);
+
+      if (filePaths.length > 0) {
+        const { error: storageError } = await supabase.storage
+          .from('product-images')
+          .remove(filePaths);
+
+        if (storageError) {
+          console.error('Error deleting images from storage:', storageError);
         }
-      } catch (e) {
-        console.error('Error deleting image file:', e);
       }
     }
 
-    // Delete product (cascades to images)
-    await db.product.delete({ where: { id } });
+    // Delete product (cascades to product_images via FK)
+    const { error } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Supabase error deleting product:', error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {

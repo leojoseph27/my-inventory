@@ -34,9 +34,16 @@ export function AuthScreen() {
         const data = await res.json();
         setAdminExists(data.exists);
         setIsSetup(!data.exists);
+      } else {
+        // If the table doesn't exist yet, show setup form
+        setAdminExists(false);
+        setIsSetup(true);
       }
     } catch (error) {
       console.error('Error checking admin:', error);
+      // Default to setup mode on error
+      setAdminExists(false);
+      setIsSetup(true);
     } finally {
       setIsLoading(false);
     }
