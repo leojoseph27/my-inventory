@@ -147,7 +147,7 @@ export function ProductDetail() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-xl font-bold">{product.englishDescription || 'Product Details'}</h1>
+          <h1 className="text-xl font-bold">{product.englishDescription || product.ndNumber || (product.sr != null ? `Item #${product.sr}` : 'Product Details')}</h1>
           <p className="text-sm text-muted-foreground">
             {product.ndNumber && `ND: ${product.ndNumber}`}
             {product.barcode && ` | Barcode: ${product.barcode}`}
