@@ -3,15 +3,25 @@
 import { useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
+import { Badge } from '@/components/ui/badge';
 import { useInventoryStore } from '@/store/inventory-store';
-import { ArrowLeft, Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { ArrowLeft, Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Loader2, AlertTriangle, Info } from 'lucide-react';
 import { toast } from 'sonner';
+
+interface ImportResult {
+  imported: number;
+  errors: number;
+  total: number;
+  detectedHeaders?: string[];
+  columnMapping?: Record<string, string>;
+  unmappedColumns?: string[];
+  errorDetails?: { row: number; error: string }[];
+}
 
 export function ExcelImport() {
   const { setView, goBack } = useInventoryStore();
   const [importing, setImporting] = useState(false);
-  const [result, setResult] = useState<{ imported: number; errors: number; total: number } | null>(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -43,22 +53,37 @@ export function ExcelImport() {
       const formData = new FormData();
       formData.append('file', selectedFile);
 
+      // Clean up ghost products before import
+      try {
+        await fetch('/api/products/cleanup', { method: 'DELETE' });
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+
       const res = await fetch('/api/products/import', {
         method: 'POST',
         body: formData,
       });
 
+      const data = await res.json();
+
       if (res.ok) {
-        const data = await res.json();
         setResult(data);
-        if (data.errors > 0) {
-          toast.warning(`Imported ${data.imported} products with ${data.errors} errors`);
-        } else {
+        if (data.imported > 0 && data.errors === 0) {
           toast.success(`Successfully imported ${data.imported} products`);
+        } else if (data.imported > 0 && data.errors > 0) {
+          toast.warning(`Imported ${data.imported} products with ${data.errors} errors`);
+        } else if (data.imported === 0) {
+          toast.error('No products were imported');
         }
-        setSelectedFile(null);
+        if (data.imported > 0) {
+          setSelectedFile(null);
+        }
       } else {
-        toast.error('Failed to import Excel file');
+        toast.error(data.error || 'Failed to import Excel file');
+        if (data.detectedHeaders) {
+          setResult(data);
+        }
       }
     } catch (error) {
       console.error('Error importing:', error);
@@ -66,6 +91,23 @@ export function ExcelImport() {
     } finally {
       setImporting(false);
     }
+  };
+
+  const fieldLabelMap: Record<string, string> = {
+    sr: 'Sr No.',
+    englishDescription: 'English Description',
+    arabicDescription: 'Arabic Description',
+    ndNumber: 'ND Number',
+    barcode: 'Barcode',
+    colours: 'Colour',
+    length: 'Length (L)',
+    width: 'Width (W)',
+    height: 'Height (H)',
+    made: 'Made',
+    materials: 'Material',
+    additionalInfo: 'Additional Info',
+    price: 'Price',
+    pcs: 'Pcs',
   };
 
   return (
@@ -84,20 +126,20 @@ export function ExcelImport() {
       {/* Expected Format */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Expected Format</CardTitle>
+          <CardTitle className="text-base">Supported Column Headers</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="text-xs text-muted-foreground space-y-1">
-            <p>Column headers should match:</p>
+            <p>The importer will automatically match your column headers (case-insensitive):</p>
             <div className="flex flex-wrap gap-1 mt-2">
-              {['Sr', 'English Description', 'Arabic Description', 'ND Number', 'Barcode', 'Colour', 'L', 'W', 'H', 'Made', 'Material', 'Additional Info', 'Price', 'Pcs'].map((col) => (
+              {['sr', 'English Description', 'Arabic Description', 'ND Number', 'barcode', 'Colour', 'L', 'W', 'H', 'Made', 'Material', 'Additional INFO', 'PRICE', 'Pcs'].map((col) => (
                 <span key={col} className="bg-muted px-2 py-0.5 rounded text-[10px] font-mono">
                   {col}
                 </span>
               ))}
             </div>
             <p className="mt-2 text-xs">
-              Multi-value fields (Colour, Material, Additional Info) should be comma-separated: <code className="bg-muted px-1 rounded">Silver, Black, Gold</code>
+              Multi-value fields (Colour, Material, Additional Info) can be comma-separated: <code className="bg-muted px-1 rounded">Silver, Black, Gold</code>
             </p>
           </div>
         </CardContent>
@@ -125,7 +167,7 @@ export function ExcelImport() {
                   variant="outline"
                   size="sm"
                   className="mt-3"
-                  onClick={() => setSelectedFile(null)}
+                  onClick={() => { setSelectedFile(null); setResult(null); }}
                 >
                   Remove
                 </Button>
@@ -178,34 +220,138 @@ export function ExcelImport() {
 
       {/* Import Result */}
       {result && (
-        <Card>
-          <CardContent className="pt-4">
-            <div className="flex items-start gap-3">
-              <CheckCircle2 className="h-6 w-6 text-emerald-500 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium">Import Complete</p>
-                <div className="text-sm text-muted-foreground mt-1 space-y-0.5">
-                  <p>Total rows: {result.total}</p>
-                  <p>Successfully imported: {result.imported}</p>
-                  {result.errors > 0 && (
-                    <p className="text-amber-600 flex items-center gap-1">
-                      <AlertCircle className="h-3 w-3" />
-                      Errors: {result.errors}
-                    </p>
-                  )}
+        <div className="space-y-3">
+          {/* Summary */}
+          <Card>
+            <CardContent className="pt-4">
+              {result.imported > 0 ? (
+                <div className="flex items-start gap-3">
+                  <CheckCircle2 className="h-6 w-6 text-emerald-500 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="font-medium">Import Complete</p>
+                    <div className="text-sm text-muted-foreground mt-1 space-y-0.5">
+                      <p>Total rows: {result.total}</p>
+                      <p className="text-emerald-600">Successfully imported: {result.imported}</p>
+                      {result.errors > 0 && (
+                        <p className="text-amber-600 flex items-center gap-1">
+                          <AlertCircle className="h-3 w-3" />
+                          Errors: {result.errors}
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => setView('products')}
-                >
-                  View Products
-                </Button>
-              </div>
+              ) : (
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-6 w-6 text-amber-500 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="font-medium">Import Issues</p>
+                    <div className="text-sm text-muted-foreground mt-1 space-y-0.5">
+                      <p>Total rows: {result.total}</p>
+                      <p>Imported: {result.imported}</p>
+                      {result.errors > 0 && <p>Errors: {result.errors}</p>}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Column Mapping Detected */}
+          {result.detectedHeaders && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Info className="h-4 w-4 text-blue-500" />
+                  Column Mapping
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div>
+                  <p className="text-xs text-muted-foreground mb-2">Detected headers in your file:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {result.detectedHeaders.map((h) => (
+                      <Badge key={h} variant="outline" className="text-[10px] font-mono">
+                        {h}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+
+                {result.columnMapping && Object.keys(result.columnMapping).length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-2">Matched columns:</p>
+                    <div className="space-y-1">
+                      {Object.entries(result.columnMapping).map(([dbField, excelHeader]) => (
+                        <div key={dbField} className="flex items-center gap-2 text-xs">
+                          <Badge variant="secondary" className="font-mono text-[10px]">
+                            {excelHeader}
+                          </Badge>
+                          <span className="text-muted-foreground">→</span>
+                          <span className="text-foreground">{fieldLabelMap[dbField] || dbField}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {result.unmappedColumns && result.unmappedColumns.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-2">Unmapped columns (ignored):</p>
+                    <div className="flex flex-wrap gap-1">
+                      {result.unmappedColumns.map((col) => (
+                        <Badge key={col} variant="outline" className="text-[10px] text-amber-600 border-amber-300">
+                          {col}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Error Details */}
+          {result.errorDetails && result.errorDetails.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2 text-amber-600">
+                  <AlertCircle className="h-4 w-4" />
+                  Error Details ({result.errorDetails.length}{result.errorDetails.length >= 20 ? '+' : ''})
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="max-h-48 overflow-y-auto space-y-1">
+                  {result.errorDetails.map((err, i) => (
+                    <div key={i} className="flex items-start gap-2 text-xs">
+                      <span className="text-muted-foreground shrink-0">Row {err.row}:</span>
+                      <span className="text-amber-600">{err.error}</span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Action buttons after import */}
+          {result.imported > 0 && (
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                className="flex-1 h-11"
+                onClick={() => setView('products')}
+              >
+                View Products
+              </Button>
+              <Button
+                className="flex-1 h-11"
+                onClick={() => { setResult(null); }}
+              >
+                Import More
+              </Button>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </div>
       )}
     </div>
   );
