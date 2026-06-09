@@ -3,34 +3,52 @@ import { createAdminClient } from '@/utils/supabase/server';
 import * as XLSX from 'xlsx';
 
 /**
- * Excel Import Route
+ * Excel Import Route — Two-Row Header Support
  *
- * Imports ALL rows from an Excel file into the Supabase products table.
- * - Every row is inserted, even partially completed ones.
- * - Empty cells become null in the database.
- * - Multi-value fields (Colour, Material, Additional Info) are parsed from
- *   comma/semicolon-separated strings into JSON arrays.
- * - Detailed logging for every row.
+ * Supports Excel files with a two-row header structure:
+ *   Row 1: sr | English Description | Arabic Description | ND Number | barcode | Colour | SIZE mm | Made | Material | Additional INFO | PRICE | Pcs | Photo
+ *   Row 2: (empty cells matching Row 1)                              | L      | W      | H      | (empty cells matching Row 1)
+ *
+ * "SIZE mm" is a merged parent header spanning 3 columns (L, W, H).
+ * After resolving, the effective column headers become:
+ *   sr, English Description, Arabic Description, ND Number, barcode,
+ *   Colour, L, W, H, Made, Material, Additional INFO, PRICE, Pcs, Photo
  *
  * Column mapping (Excel Header → Supabase column):
- *   sr               → sr
+ *   sr                  → sr
  *   English Description → english_description
  *   Arabic Description  → arabic_description
- *   ND Number        → nd_number
- *   barcode          → barcode
- *   Colour           → colours  (comma-separated → JSON array)
- *   L                → length
- *   W                → width
- *   H                → height
- *   Made             → made
- *   Material         → materials (comma-separated → JSON array)
- *   Additional INFO  → additional_info (comma-separated → JSON array)
- *   PRICE            → price
- *   Pcs              → pcs
+ *   ND Number           → nd_number
+ *   barcode             → barcode
+ *   Colour              → colours  (comma/semicolon-separated → JSON array)
+ *   L                   → length
+ *   W                   → width
+ *   H                   → height
+ *   Made                → made
+ *   Material            → materials (comma/semicolon-separated → JSON array)
+ *   Additional INFO     → additional_info (comma/semicolon-separated → JSON array)
+ *   PRICE               → price
+ *   Pcs                 → pcs
+ *   Photo               → photo
+ *
+ * Import behavior:
+ *   - Import every product row, even partially completed ones.
+ *   - Empty cells become null in Supabase.
+ *   - Only skip rows where ALL mapped fields are null.
+ *   - Unknown columns are ignored.
+ *   - Arabic text is supported natively (UTF-8).
+ *   - Barcode values stored as text, number, or scientific notation are all handled.
+ *   - Multi-value fields (Colour, Material, Additional INFO) are parsed into JSON arrays.
  */
 
-// Column mapping config: Excel header patterns → our field name + value type
-const COLUMN_MAPPINGS: { patterns: string[]; field: string; type: 'number' | 'string' | 'array' }[] = [
+// ────────────────────────────────────────────────────────────────────────────────
+// Column mapping config: Excel header patterns → JS field name + value type
+// ────────────────────────────────────────────────────────────────────────────────
+const COLUMN_MAPPINGS: {
+  patterns: string[];
+  field: string;
+  type: 'number' | 'string' | 'array';
+}[] = [
   { patterns: ['sr', 'Sr', 'SR', 's.r', 'S.R', 'serial', 'Serial', 'no', 'No', '#'], field: 'sr', type: 'number' },
   { patterns: ['english description', 'englishdescription', 'english_description', 'english desc', 'description', 'desc', 'english_desc', 'product description', 'name'], field: 'englishDescription', type: 'string' },
   { patterns: ['arabic description', 'arabicdescription', 'arabic_description', 'arabic desc', 'arabic_desc', 'arabic', 'arab description'], field: 'arabicDescription', type: 'string' },
@@ -45,9 +63,10 @@ const COLUMN_MAPPINGS: { patterns: string[]; field: string; type: 'number' | 'st
   { patterns: ['additional info', 'additionalinfo', 'additional_info', 'additional information', 'add info', 'add_info', 'additional', 'extra info', 'extra_info', 'info', 'notes', 'extra'], field: 'additionalInfo', type: 'array' },
   { patterns: ['price', 'Price', 'PRICE', 'unit price', 'unitprice', 'unit_price', 'cost', 'amount', 'rate'], field: 'price', type: 'number' },
   { patterns: ['pcs', 'Pcs', 'PCS', 'pieces', 'Pieces', 'PIECES', 'piece', 'qty', 'quantity', 'Quantity', 'QTY', 'units', 'stock'], field: 'pcs', type: 'number' },
+  { patterns: ['photo', 'Photo', 'PHOTO', 'image', 'Image', 'picture', 'Picture', 'img'], field: 'photo', type: 'string' },
 ];
 
-// CamelCase → snake_case mapping for Supabase columns
+// JS camelCase field → Supabase snake_case column
 const FIELD_TO_DB: Record<string, string> = {
   sr: 'sr',
   englishDescription: 'english_description',
@@ -63,38 +82,158 @@ const FIELD_TO_DB: Record<string, string> = {
   additionalInfo: 'additional_info',
   price: 'price',
   pcs: 'pcs',
+  photo: 'photo',
 };
 
-/**
- * Finds the Excel column that matches one of the given patterns.
- * Tries exact match → case-insensitive → normalised (no spaces/underscores/hyphens).
- */
-function findFieldValue(row: Record<string, any>, patterns: string[]): { key: string; value: any } | null {
-  const rowKeys = Object.keys(row);
+// Headers from Row 1 that are parent/group headers spanning multiple columns
+// These get replaced by the child headers in Row 2.
+// Stored pre-normalised so that .includes() comparison works correctly.
+const PARENT_HEADERS_NORMALIZED = [
+  'sizemm', 'size', 'dimensions', 'dimension', 'sizemm',
+];
 
-  // Exact match
-  for (const pattern of patterns) {
-    if (row[pattern] !== undefined) return { key: pattern, value: row[pattern] };
+// ────────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Normalise a header string for comparison (lowercase, strip spaces/underscores/hyphens).
+ */
+function normalize(s: string): string {
+  return s.toLowerCase().replace(/[\s_-]/g, '').trim();
+}
+
+/**
+ * Build the effective single-row header from a 2-row header Excel sheet.
+ *
+ * Row 1 may contain a merged/grouped parent header like "SIZE mm" spanning
+ * 3 columns. Row 2 contains the child headers L, W, H under it.
+ *
+ * Strategy:
+ *  1. Read both rows as arrays of cell values.
+ *  2. For each column position, prefer the Row 2 value if Row 1 is a known
+ *     parent header or if Row 1 is empty and Row 2 has content.
+ *  3. If Row 2 is empty for that column, keep Row 1's header.
+ *  4. Return the resolved header array and the data-start row index.
+ */
+function resolveTwoRowHeaders(
+  worksheet: XLSX.WorkSheet,
+): { headers: string[]; dataStartRow: number } {
+  const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
+  const maxCol = range.e.c;
+  const headers: string[] = [];
+
+  // Read Row 1 (index 0) and Row 2 (index 1)
+  const row1: string[] = [];
+  const row2: string[] = [];
+
+  for (let c = 0; c <= maxCol; c++) {
+    const cell1 = worksheet[XLSX.utils.encode_cell({ r: 0, c })];
+    const cell2 = worksheet[XLSX.utils.encode_cell({ r: 1, c })];
+    row1.push(cell1 ? String(cell1.v ?? '').trim() : '');
+    row2.push(cell2 ? String(cell2.v ?? '').trim() : '');
   }
-  // Case-insensitive match
-  for (const pattern of patterns) {
-    const patternLower = pattern.toLowerCase();
-    for (const key of rowKeys) {
-      if (key.toLowerCase() === patternLower && row[key] !== undefined) {
-        return { key, value: row[key] };
+
+  console.log(`[IMPORT] Raw Row 1 headers: ${JSON.stringify(row1)}`);
+  console.log(`[IMPORT] Raw Row 2 headers: ${JSON.stringify(row2)}`);
+
+  // Detect if Row 2 is a sub-header row:
+  // - Row 2 has at least one non-empty value
+  // - Row 2 is not a data row (e.g., doesn't start with a number for sr)
+  const row2HasContent = row2.some(v => v !== '');
+  const row2LooksLikeSubHeaders = row2HasContent && (
+    // Row 2 values are short labels (L, W, H, etc.) not product data
+    row2.every(v => v === '' || v.length <= 20)
+  );
+
+  // Also check: if Row 1 contains a known parent header, it's definitely 2-row
+  const row1HasParentHeader = row1.some(v => PARENT_HEADERS_NORMALIZED.includes(normalize(v)));
+
+  if (row2HasContent && (row2LooksLikeSubHeaders || row1HasParentHeader)) {
+    // Two-row header mode
+    for (let c = 0; c <= maxCol; c++) {
+      const r1 = row1[c];
+      const r2 = row2[c];
+      const r1Norm = normalize(r1);
+      const r2Norm = normalize(r2);
+
+      // If Row 1 is a known parent header (e.g., "SIZE mm"),
+      // always use Row 2 value (e.g., "L", "W", "H")
+      if (PARENT_HEADERS_NORMALIZED.includes(r1Norm) && r2 !== '') {
+        headers.push(r2);
+      }
+      // If Row 1 is empty and Row 2 has content, use Row 2
+      else if (r1 === '' && r2 !== '') {
+        headers.push(r2);
+      }
+      // If Row 2 is empty, use Row 1
+      else if (r2 === '') {
+        headers.push(r1);
+      }
+      // Both have content: prefer Row 2 if Row 1 is a parent header,
+      // otherwise prefer Row 1 (top-level header takes precedence)
+      else if (PARENT_HEADERS_NORMALIZED.includes(r1Norm)) {
+        headers.push(r2);
+      }
+      else {
+        headers.push(r1);
+      }
+    }
+    console.log(`[IMPORT] Detected 2-row header structure. Resolved headers: ${JSON.stringify(headers)}`);
+    return { headers, dataStartRow: 2 }; // Data starts at Row 3 (0-indexed row 2)
+  }
+
+  // Single-row header mode — use Row 1 only
+  for (let c = 0; c <= maxCol; c++) {
+    headers.push(row1[c]);
+  }
+  console.log(`[IMPORT] Single-row header detected: ${JSON.stringify(headers)}`);
+  return { headers, dataStartRow: 1 }; // Data starts at Row 2 (0-indexed row 1)
+}
+
+/**
+ * Match a header string against a list of patterns.
+ * Tries exact → case-insensitive → normalised.
+ */
+function matchHeader(header: string, patterns: string[]): boolean {
+  if (!header) return false;
+  const headerLower = header.toLowerCase();
+  const headerNorm = normalize(header);
+  return patterns.some(p => {
+    if (header === p) return true;
+    if (headerLower === p.toLowerCase()) return true;
+    if (headerNorm === normalize(p)) return true;
+    return false;
+  });
+}
+
+/**
+ * Build the column mapping: for each column position, determine which
+ * JS field it maps to and what type it is.
+ */
+function buildColumnMapping(
+  headers: string[],
+): { mapping: Map<number, { field: string; type: string }>; unmapped: string[] } {
+  const mapping = new Map<number, { field: string; type: string }>();
+  const mappedIndices = new Set<number>();
+
+  for (const colMapping of COLUMN_MAPPINGS) {
+    for (let c = 0; c < headers.length; c++) {
+      if (mappedIndices.has(c)) continue;
+      if (matchHeader(headers[c], colMapping.patterns)) {
+        mapping.set(c, { field: colMapping.field, type: colMapping.type });
+        mappedIndices.add(c);
+        break; // Use the first matching column for this field
       }
     }
   }
-  // Normalised match (strip spaces, underscores, hyphens)
-  const normalizedPatterns = patterns.map(p => p.toLowerCase().replace(/[\s_-]/g, ''));
-  for (const key of rowKeys) {
-    const normalizedKey = key.toLowerCase().replace(/[\s_-]/g, '');
-    const matchIndex = normalizedPatterns.indexOf(normalizedKey);
-    if (matchIndex !== -1 && row[key] !== undefined) {
-      return { key, value: row[key] };
-    }
-  }
-  return null;
+
+  const unmapped = headers
+    .map((h, i) => ({ h, i }))
+    .filter(({ h, i }) => h && !mappedIndices.has(i))
+    .map(({ h }) => h);
+
+  return { mapping, unmapped };
 }
 
 /**
@@ -134,6 +273,68 @@ function toString(value: any): string | null {
   return String(value).trim() || null;
 }
 
+/**
+ * Convert a barcode value to string, handling scientific notation.
+ * E.g., 6.90123E+12 → "6901230000000"
+ */
+function toBarcode(value: any): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') {
+    // Format number without scientific notation
+    return value.toLocaleString('fullwide', { useGrouping: false });
+  }
+  const str = String(value).trim();
+  if (!str) return null;
+  // Handle scientific notation in string form
+  if (/^\d+\.?\d*e[+-]?\d+$/i.test(str)) {
+    const num = Number(str);
+    if (!isNaN(num)) {
+      return num.toLocaleString('fullwide', { useGrouping: false });
+    }
+  }
+  return str;
+}
+
+/**
+ * Read a single cell value from a worksheet at the given row/column.
+ */
+function getCellValue(worksheet: XLSX.WorkSheet, r: number, c: number): any {
+  const cell = worksheet[XLSX.utils.encode_cell({ r, c })];
+  return cell ? cell.v : '';
+}
+
+/**
+ * Fetch the list of columns that exist in the Supabase products table.
+ * This allows us to skip fields that don't have a corresponding column yet.
+ */
+async function getTableColumns(supabase: any): Promise<Set<string>> {
+  try {
+    // Insert a dummy row with all nulls to discover which columns exist
+    // Actually, a better approach: use the OpenAPI/Swagger endpoint
+    const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const apiKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const response = await fetch(`${baseUrl}/rest/v1/?apikey=${apiKey}`, {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+      },
+    });
+    if (response.ok) {
+      const schema = await response.json();
+      const props = schema?.definitions?.products?.properties;
+      if (props) {
+        return new Set(Object.keys(props));
+      }
+    }
+  } catch (e) {
+    console.warn('[IMPORT] Could not fetch table schema, will attempt all fields:', e);
+  }
+  // Fallback: assume all mapped columns exist
+  return new Set(Object.values(FIELD_TO_DB));
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+// POST handler
+// ────────────────────────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   const importStartTime = Date.now();
 
@@ -146,6 +347,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
+    // ── Detect available columns in Supabase ──
+    const tableColumns = await getTableColumns(supabase);
+    console.log(`[IMPORT] Supabase products table columns: ${JSON.stringify([...tableColumns].sort())}`);
+
+    // ── Read Excel file ──
     const buffer = Buffer.from(await file.arrayBuffer());
     const workbook = XLSX.read(buffer, { type: 'buffer' });
 
@@ -155,40 +361,43 @@ export async function POST(request: NextRequest) {
 
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    // Use defval: '' so that empty cells become '' rather than being omitted
-    const rows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { defval: '' });
 
-    if (rows.length === 0) {
+    if (!worksheet['!ref']) {
+      return NextResponse.json({ error: 'Excel sheet is empty' }, { status: 400 });
+    }
+
+    // ── Resolve headers (supports 2-row header structure) ──
+    const { headers, dataStartRow } = resolveTwoRowHeaders(worksheet);
+
+    // ── Build column mapping ──
+    const { mapping, unmapped } = buildColumnMapping(headers);
+
+    // Log the resolved mapping
+    const mappedHeaders: Record<string, string> = {};
+    for (const [colIdx, mapInfo] of mapping) {
+      mappedHeaders[mapInfo.field] = headers[colIdx];
+    }
+    console.log(`[IMPORT] Final mapped headers: ${JSON.stringify(mappedHeaders)}`);
+    if (unmapped.length > 0) {
+      console.log(`[IMPORT] Unmapped columns (ignored): ${JSON.stringify(unmapped)}`);
+    }
+
+    if (mapping.size === 0) {
       return NextResponse.json({
-        error: 'Excel file has no data rows',
+        error: 'No recognizable column headers found in Excel file.',
+        rawHeaders: headers,
         imported: 0, errors: 0, total: 0, skipped: 0,
       }, { status: 400 });
     }
 
-    const detectedHeaders = Object.keys(rows[0]);
-    console.log(`[IMPORT] File: ${file.name}, Rows: ${rows.length}, Headers: ${JSON.stringify(detectedHeaders)}`);
+    // ── Parse data rows ──
+    const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
+    const totalDataRows = range.e.r - dataStartRow + 1;
 
-    // Build column mapping for this file
-    const mappingResult: Record<string, { field: string; type: string; excelKey: string }> = {};
-    for (const mapping of COLUMN_MAPPINGS) {
-      const found = findFieldValue(rows[0], mapping.patterns);
-      if (found) {
-        mappingResult[mapping.field] = { field: mapping.field, type: mapping.type, excelKey: found.key };
-      }
-    }
-
-    console.log(`[IMPORT] Column mapping: ${JSON.stringify(Object.fromEntries(
-      Object.entries(mappingResult).map(([f, i]) => [f, i.excelKey])
-    ))}`);
-
-    const mappedExcelKeys = new Set(Object.values(mappingResult).map(m => m.excelKey));
-    const unmappedColumns = detectedHeaders.filter(h => !mappedExcelKeys.has(h) && h.trim() !== '');
-
-    if (Object.keys(mappingResult).length === 0) {
+    if (totalDataRows <= 0) {
       return NextResponse.json({
-        error: 'No recognizable column headers found in Excel file.',
-        detectedHeaders,
-        imported: 0, errors: 0, total: rows.length, skipped: 0,
+        error: 'Excel file has no data rows after headers',
+        imported: 0, errors: 0, total: 0, skipped: 0,
       }, { status: 400 });
     }
 
@@ -198,28 +407,40 @@ export async function POST(request: NextRequest) {
     const errorDetails: { row: number; error: string; data?: string }[] = [];
     const successDetails: { row: number; sr: number | null; description: string | null; ndNumber: string | null }[] = [];
 
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const rowNum = i + 2; // Excel row number (1-based + header)
+    // Log first 5 parsed rows for debugging
+    const previewRows: { row: number; data: Record<string, any> }[] = [];
+
+    for (let r = dataStartRow; r <= range.e.r; r++) {
+      const rowNum = r + 1; // 1-based Excel row number
 
       try {
-        // Parse all mapped fields from the row
+        // Read cell values for this row
         const record: Record<string, any> = {};
 
-        for (const [dbField, mapInfo] of Object.entries(mappingResult)) {
-          const rawValue = row[mapInfo.excelKey];
+        for (const [colIdx, mapInfo] of mapping) {
+          const rawValue = getCellValue(worksheet, r, colIdx);
+
           switch (mapInfo.type) {
             case 'number':
-              record[dbField] = toNumber(rawValue);
+              record[mapInfo.field] = toNumber(rawValue);
               break;
             case 'string':
-              record[dbField] = toString(rawValue);
+              // Use special barcode handling for the barcode field
+              if (mapInfo.field === 'barcode') {
+                record[mapInfo.field] = toBarcode(rawValue);
+              } else {
+                record[mapInfo.field] = toString(rawValue);
+              }
               break;
-            case 'array': {
-              record[dbField] = parseArrayField(rawValue);
+            case 'array':
+              record[mapInfo.field] = parseArrayField(rawValue);
               break;
-            }
           }
+        }
+
+        // Capture preview for first 5 rows
+        if (previewRows.length < 5) {
+          previewRows.push({ row: rowNum, data: { ...record } });
         }
 
         // Skip completely empty rows (ALL fields are null)
@@ -232,13 +453,17 @@ export async function POST(request: NextRequest) {
 
         // IMPORTANT: Import ALL rows, even partially completed ones.
         // We only skip if the row is truly empty (all nulls).
-        // Rows with just an sr, or just an ND number, etc. are still inserted.
 
         // Convert camelCase field names to snake_case for Supabase
+        // and filter out fields that don't have a corresponding DB column
         const dbData: Record<string, any> = {};
         for (const [field, value] of Object.entries(record)) {
           const dbKey = FIELD_TO_DB[field] || field;
-          dbData[dbKey] = value;
+          if (tableColumns.has(dbKey)) {
+            dbData[dbKey] = value;
+          } else {
+            console.warn(`[IMPORT] Column "${dbKey}" does not exist in Supabase table, skipping field`);
+          }
         }
 
         const { error: insertError } = await supabase
@@ -260,26 +485,40 @@ export async function POST(request: NextRequest) {
       } catch (err: any) {
         errors++;
         const errorMsg = err?.message || String(err);
-        const dataPreview = JSON.stringify(row).substring(0, 200);
-        errorDetails.push({ row: rowNum, error: errorMsg, data: dataPreview });
+        // Try to get a data preview
+        const dataPreview: Record<string, any> = {};
+        for (const [colIdx, mapInfo] of mapping) {
+          dataPreview[mapInfo.field] = getCellValue(worksheet, r, colIdx);
+        }
+        const dataStr = JSON.stringify(dataPreview).substring(0, 200);
+        errorDetails.push({ row: rowNum, error: errorMsg, data: dataStr });
         console.error(`[IMPORT] Row ${rowNum}: FAILED - ${errorMsg}`);
       }
     }
 
     const elapsedMs = Date.now() - importStartTime;
-    console.log(`[IMPORT] Complete: ${imported} imported, ${errors} errors, ${skipped} skipped, ${rows.length} total rows (${elapsedMs}ms)`);
+    const totalProcessed = imported + errors + skipped;
+
+    console.log(`[IMPORT] Complete: ${imported} imported, ${errors} errors, ${skipped} skipped, ${totalProcessed} total rows (${elapsedMs}ms)`);
+
+    // Log first 5 parsed rows
+    if (previewRows.length > 0) {
+      console.log(`[IMPORT] First ${previewRows.length} parsed rows:`);
+      for (const pr of previewRows) {
+        console.log(`  Row ${pr.row}: ${JSON.stringify(pr.data)}`);
+      }
+    }
 
     return NextResponse.json({
       imported,
       errors,
       skipped,
-      total: rows.length,
+      total: totalProcessed,
       elapsedMs,
-      detectedHeaders,
-      columnMapping: Object.fromEntries(
-        Object.entries(mappingResult).map(([field, info]) => [field, info.excelKey])
-      ),
-      unmappedColumns,
+      rawHeaders: headers,
+      columnMapping: mappedHeaders,
+      unmappedColumns: unmapped,
+      previewRows: previewRows.length > 0 ? previewRows : undefined,
       successDetails: successDetails.length > 0 ? successDetails : undefined,
       errorDetails: errorDetails.length > 0 ? errorDetails.slice(0, 50) : undefined,
     });
