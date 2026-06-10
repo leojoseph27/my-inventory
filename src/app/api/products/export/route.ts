@@ -7,37 +7,23 @@ import * as XLSX from 'xlsx';
  *
  * Recreates the user's Excel template format:
  *
- *   Row 1: sr | English Description | Arabic Description | ND Number | barcode | Colour | SIZE mm | Made | Material | Additional INFO | PRICE | Pcs | Photo
- *   Row 2:    |                     |                     |           |         |         | L | W | H      |         |                 |       |     |
+ *   Row 1: sr | English Description | Arabic Description | ND Number | barcode | Colour | SIZE mm | Made | Material | Additional INFO | PRICE | Pcs | Photo | Images
+ *   Row 2:    |                     |                     |           |         |         | L | W | H      |         |                 |       |     |       |
  *
  * "SIZE mm" spans 3 columns (L, W, H) as a merged cell.
  * Data rows start at Row 3.
  *
- * Supabase snake_case → Excel header mapping:
- *   sr → sr
- *   english_description → English Description
- *   arabic_description → Arabic Description
- *   nd_number → ND Number
- *   barcode → barcode
- *   colours → Colour (JSON array → comma-separated string)
- *   length → L (under SIZE mm)
- *   width → W (under SIZE mm)
- *   height → H (under SIZE mm)
- *   made → Made
- *   materials → Material (JSON array → comma-separated string)
- *   additional_info → Additional INFO (JSON array → comma-separated string)
- *   price → PRICE
- *   pcs → Pcs
- *   photo → Photo
+ * IMPORTANT: Uses paginated batch fetching to handle Supabase's 1000-row default limit.
+ * All 1732+ products are exported, not just the first 1000.
  */
 
 // Column layout definition (in order of appearance in the Excel)
-// colIndex is the 0-based column position in the worksheet
 interface ColDef {
   header1: string;   // Row 1 header text (parent header or the main header)
   header2: string;   // Row 2 header text (sub-header or empty)
-  dbField: string;   // Supabase snake_case column name
+  dbField: string;   // Supabase snake_case column name (or virtual field name)
   isJsonArray?: boolean;
+  isVirtual?: boolean;  // Virtual fields that need custom extraction logic
 }
 
 const COLUMN_DEFS: ColDef[] = [
@@ -57,6 +43,7 @@ const COLUMN_DEFS: ColDef[] = [
   { header1: 'PRICE', header2: '', dbField: 'price' },
   { header1: 'Pcs', header2: '', dbField: 'pcs' },
   { header1: 'Photo', header2: '', dbField: 'photo' },
+  { header1: 'Images', header2: '', dbField: 'product_images_urls', isVirtual: true },
 ];
 
 /**
@@ -74,26 +61,70 @@ function jsonArrayToString(value: string | null | undefined): string {
   }
 }
 
+/**
+ * Extract a virtual field value from a product row.
+ * Virtual fields are computed from related data, not stored directly.
+ */
+function getVirtualFieldValue(product: any, dbField: string): string {
+  if (dbField === 'product_images_urls') {
+    // Combine all uploaded image URLs into a comma-separated string
+    if (product.product_images && Array.isArray(product.product_images)) {
+      const urls = product.product_images
+        .filter((img: any) => img.image_url)
+        .map((img: any) => img.image_url);
+      return urls.length > 0 ? urls.join(', ') : '';
+    }
+    return '';
+  }
+  return '';
+}
+
+/**
+ * Fetch ALL products from Supabase using paginated batch fetching.
+ * Supabase's REST API defaults to max 1000 rows per request.
+ */
+async function fetchAllProducts(supabase: ReturnType<typeof createAdminClient>) {
+  const allRows: any[] = [];
+  let offset = 0;
+  const batchSize = 1000;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from('products')
+      .select('*, product_images(*)')
+      .order('sr', { ascending: true, nullsFirst: true })
+      .range(offset, offset + batchSize - 1);
+
+    if (error) {
+      throw error;
+    }
+
+    if (!data || data.length === 0) {
+      hasMore = false;
+    } else {
+      allRows.push(...data);
+      hasMore = data.length === batchSize;
+      offset += batchSize;
+    }
+  }
+
+  return allRows;
+}
+
 export async function GET() {
   try {
     const supabase = createAdminClient();
 
-    const { data, error } = await supabase
-      .from('products')
-      .select('*, product_images(*)')
-      .order('sr', { ascending: true, nullsFirst: true });
-
-    if (error) {
-      console.error('Supabase error exporting products:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
+    // Fetch ALL products using paginated batch fetching (handles >1000 rows)
+    const data = await fetchAllProducts(supabase);
 
     // ── Create workbook and worksheet ──
     const workbook = XLSX.utils.book_new();
     const worksheet: XLSX.WorkSheet = {};
 
     const totalCols = COLUMN_DEFS.length;
-    const totalRows = (data || []).length;
+    const totalRows = data.length;
     const maxRow = totalRows + 2; // +2 for the two header rows (0-indexed: rows 0,1=headers, 2+=data)
 
     // ── Write Row 1 (parent headers) and Row 2 (sub-headers) ──
@@ -116,7 +147,14 @@ export async function GET() {
       for (let c = 0; c < totalCols; c++) {
         const col = COLUMN_DEFS[c];
         const cellRef = XLSX.utils.encode_cell({ r: r + 2, c });
-        let value = product[col.dbField] ?? '';
+
+        // Get the value — virtual fields use custom extraction
+        let value: any;
+        if (col.isVirtual) {
+          value = getVirtualFieldValue(product, col.dbField);
+        } else {
+          value = product[col.dbField] ?? '';
+        }
 
         if (col.isJsonArray) {
           value = jsonArrayToString(value);
@@ -140,7 +178,6 @@ export async function GET() {
     });
 
     // ── Merge "SIZE mm" across 3 columns in Row 1 ──
-    // Find the column indices for the SIZE mm group
     const sizeStartCol = COLUMN_DEFS.findIndex(c => c.header1 === 'SIZE mm');
     if (sizeStartCol !== -1) {
       worksheet['!merges'] = [
@@ -168,6 +205,7 @@ export async function GET() {
       { wch: 10 },  // PRICE
       { wch: 6 },   // Pcs
       { wch: 30 },  // Photo
+      { wch: 50 },  // Images (uploaded image URLs)
     ];
 
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Products');
