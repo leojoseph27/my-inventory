@@ -68,3 +68,29 @@ Stage Summary:
 - Search is case-insensitive (germany/Germany/GERMANY all match)
 - Only one country can be selected at a time (single-select)
 - Excel import/export unchanged — made field remains a string in the database
+
+---
+Task ID: 16
+Agent: Main
+Task: Redesign Price field to prevent decimal-point mistakes with Dinar/Fils split
+
+Work Log:
+- Added priceDinar and priceFils state fields alongside formData.price
+- Added useEffect to parse formData.price into Dinar/Fils on product load (edit mode)
+- Added combinedPrice useMemo that shows padded preview (e.g., "1.050 KD")
+- Added handlePriceDinarChange: strips non-digits, combines with Fils, updates formData.price
+- Added handlePriceFilsChange: strips non-digits, max 3 digits, max 999, pads to 3 for computation
+- Replaced single Price number input with two-field layout: [Dinar] . [Fils]
+- Added small "Dinar" and "Fils" sub-labels above each field
+- Added live preview below showing combined padded price (e.g., "1.005 KD")
+- Database schema unchanged — price still stored as a single float
+- Excel import/export unchanged — still uses single price column
+- Auto-save still works because formData.price is updated by the handlers
+
+Stage Summary:
+- Price field split into Dinar + Fils with "." separator
+- Fils auto-pads to 3 digits for computation (5 → 005, 50 → 050)
+- Empty Fils defaults to 000
+- Only digits allowed, Fils max 999
+- Live preview shows combined value like "1.050 KD"
+- Eliminates decimal-point entry mistakes

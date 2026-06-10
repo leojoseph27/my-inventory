@@ -50,6 +50,78 @@ export function ProductForm({ mode }: ProductFormProps) {
     pcs: '',
   });
 
+  // ── Dinar / Fils split for Price (KD) ────────────────────────────────
+  const [priceDinar, setPriceDinar] = useState('');
+  const [priceFils, setPriceFils] = useState('');
+
+  // Parse formData.price → Dinar + Fils whenever price changes externally
+  // (e.g. editing an existing product)
+  useEffect(() => {
+    if (formData.price) {
+      const num = parseFloat(formData.price);
+      if (!isNaN(num)) {
+        const dinar = Math.floor(num);
+        // Round fils to avoid floating-point issues (e.g. 1.050 → 50, not 49.999...)
+        const fils = Math.round((num - dinar) * 1000);
+        setPriceDinar(String(dinar));
+        setPriceFils(String(fils).padStart(3, '0'));
+      } else {
+        setPriceDinar('');
+        setPriceFils('');
+      }
+    } else {
+      setPriceDinar('');
+      setPriceFils('');
+    }
+  }, [mode, currentProduct]); // only on product load, NOT every formData.price change
+
+  // Compute the combined price string from Dinar + Fils
+  const combinedPrice = useMemo(() => {
+    const dinar = priceDinar.trim() || '0';
+    const filsRaw = priceFils.trim();
+    const fils = filsRaw ? filsRaw.padStart(3, '0') : '000';
+    const dinarNum = parseInt(dinar) || 0;
+    const filsNum = parseInt(fils) || 0;
+    if (dinarNum === 0 && filsNum === 0) return '';
+    return `${dinarNum}.${fils}`;
+  }, [priceDinar, priceFils]);
+
+  const handlePriceDinarChange = useCallback((value: string) => {
+    // Only allow digits
+    const clean = value.replace(/[^0-9]/g, '');
+    setPriceDinar(clean);
+    // Update formData.price
+    const dinar = clean || '0';
+    const filsRaw = priceFils.trim();
+    const fils = filsRaw ? filsRaw.padStart(3, '0') : '000';
+    const dinarNum = parseInt(dinar) || 0;
+    const filsNum = parseInt(fils) || 0;
+    if (dinarNum === 0 && filsNum === 0) {
+      handleFieldChange('price', '');
+    } else {
+      handleFieldChange('price', `${dinarNum}.${fils}`);
+    }
+  }, [priceFils, handleFieldChange]);
+
+  const handlePriceFilsChange = useCallback((value: string) => {
+    // Only allow digits, max 3 digits
+    let clean = value.replace(/[^0-9]/g, '');
+    if (clean.length > 3) clean = clean.slice(0, 3);
+    // Prevent value above 999
+    if (clean && parseInt(clean) > 999) clean = '999';
+    setPriceFils(clean);
+    // Update formData.price
+    const dinar = priceDinar.trim() || '0';
+    const fils = clean ? clean.padStart(3, '0') : '000';
+    const dinarNum = parseInt(dinar) || 0;
+    const filsNum = parseInt(fils) || 0;
+    if (dinarNum === 0 && filsNum === 0) {
+      handleFieldChange('price', '');
+    } else {
+      handleFieldChange('price', `${dinarNum}.${fils}`);
+    }
+  }, [priceDinar, handleFieldChange]);
+
   const [colourSuggestions, setColourSuggestions] = useState<string[]>([]);
   const [materialSuggestions, setMaterialSuggestions] = useState<string[]>([]);
   const [madeSuggestions, setMadeSuggestions] = useState<string[]>([]);
@@ -457,16 +529,44 @@ export function ProductForm({ mode }: ProductFormProps) {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="price">Price (KD)</Label>
-              <Input
-                id="price"
-                type="number"
-                step="0.001"
-                value={formData.price}
-                onChange={(e) => handleFieldChange('price', e.target.value)}
-                placeholder="0.000 KD"
-                className="h-11"
-              />
+              <Label>Price (KD)</Label>
+              <div className="grid grid-cols-2 gap-0">
+                <div className="space-y-0.5">
+                  <span className="text-[10px] text-muted-foreground pl-1">Dinar</span>
+                  <Input
+                    type="text"
+                    inputMode="numeric"
+                    value={priceDinar}
+                    onChange={(e) => handlePriceDinarChange(e.target.value)}
+                    placeholder="0"
+                    className="h-11 rounded-r-none text-right font-mono text-base"
+                    aria-label="Dinar"
+                  />
+                </div>
+                <div className="space-y-0.5">
+                  <span className="text-[10px] text-muted-foreground pl-1">Fils</span>
+                  <div className="flex items-center">
+                    <span className="flex h-11 items-center justify-center border-y border-input bg-muted px-1.5 text-lg font-bold text-muted-foreground select-none">
+                      .
+                    </span>
+                    <Input
+                      type="text"
+                      inputMode="numeric"
+                      value={priceFils}
+                      onChange={(e) => handlePriceFilsChange(e.target.value)}
+                      placeholder="000"
+                      maxLength={3}
+                      className="h-11 rounded-l-none font-mono text-base"
+                      aria-label="Fils"
+                    />
+                  </div>
+                </div>
+              </div>
+              {combinedPrice && (
+                <p className="text-xs text-muted-foreground font-mono">
+                  {combinedPrice} KD
+                </p>
+              )}
             </div>
           </div>
 
