@@ -58,6 +58,7 @@ export function mapProductFromDb(row: any): any {
     additionalInfo: row.additional_info,
     price: row.price,
     pcs: row.pcs,
+    photo: row.photo,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     images: [] as any[],

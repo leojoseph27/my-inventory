@@ -29,7 +29,9 @@ import * as XLSX from 'xlsx';
  *   Additional INFO     → additional_info (comma/semicolon-separated → JSON array)
  *   PRICE               → price
  *   Pcs                 → pcs
- *   Photo               → photo
+ *   Photo               → photo    (plain string from Excel; null if empty.
+ *                                    Not required for import. Does NOT interact
+ *                                    with product_images table or Storage bucket.)
  *
  * Import behavior:
  *   - Import every product row, even partially completed ones.
