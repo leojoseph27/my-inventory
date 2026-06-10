@@ -54,6 +54,41 @@ export function ProductForm({ mode }: ProductFormProps) {
   const [priceDinar, setPriceDinar] = useState('');
   const [priceFils, setPriceFils] = useState('');
 
+  // ── Duplicate check (must be defined before handleFieldChange) ──────
+  const checkDuplicates = useCallback(async (ndNumber: string, barcode: string) => {
+    if (!ndNumber && !barcode) {
+      setDuplicates(null);
+      return;
+    }
+    try {
+      const params = new URLSearchParams();
+      if (ndNumber) params.set('ndNumber', ndNumber);
+      if (barcode) params.set('barcode', barcode);
+      if (mode === 'edit' && currentProduct) params.set('excludeId', currentProduct.id);
+
+      const res = await fetch(`/api/products/check-duplicate?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDuplicates(data.duplicates);
+      }
+    } catch (error) {
+      console.error('Error checking duplicates:', error);
+    }
+  }, [mode, currentProduct, setDuplicates]);
+
+  // ── Generic field change handler (must be defined before price handlers) ──
+  const handleFieldChange = useCallback((field: string, value: any) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+    setSaveStatus('idle');
+
+    if (field === 'ndNumber' || field === 'barcode') {
+      checkDuplicates(
+        field === 'ndNumber' ? value : formData.ndNumber,
+        field === 'barcode' ? value : formData.barcode
+      );
+    }
+  }, [checkDuplicates, formData.ndNumber, formData.barcode]);
+
   // Parse formData.price → Dinar + Fils whenever price changes externally
   // (e.g. editing an existing product)
   useEffect(() => {
@@ -300,38 +335,8 @@ export function ProductForm({ mode }: ProductFormProps) {
     };
   }, [formData, mode, currentProduct]);
 
-  const checkDuplicates = useCallback(async (ndNumber: string, barcode: string) => {
-    if (!ndNumber && !barcode) {
-      setDuplicates(null);
-      return;
-    }
-    try {
-      const params = new URLSearchParams();
-      if (ndNumber) params.set('ndNumber', ndNumber);
-      if (barcode) params.set('barcode', barcode);
-      if (mode === 'edit' && currentProduct) params.set('excludeId', currentProduct.id);
-
-      const res = await fetch(`/api/products/check-duplicate?${params}`);
-      if (res.ok) {
-        const data = await res.json();
-        setDuplicates(data.duplicates);
-      }
-    } catch (error) {
-      console.error('Error checking duplicates:', error);
-    }
-  }, [mode, currentProduct, setDuplicates]);
-
-  const handleFieldChange = (field: string, value: any) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
-    setSaveStatus('idle');
-
-    if (field === 'ndNumber' || field === 'barcode') {
-      checkDuplicates(
-        field === 'ndNumber' ? value : formData.ndNumber,
-        field === 'barcode' ? value : formData.barcode
-      );
-    }
-  };
+  // checkDuplicates and handleFieldChange are defined above (before price handlers)
+  // to avoid temporal dead zone ReferenceError
 
   const handleSave = async (isAutoSave = false) => {
     if (!isAutoSave) setSaving(true);

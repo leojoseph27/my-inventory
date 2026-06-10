@@ -94,3 +94,21 @@ Stage Summary:
 - Only digits allowed, Fils max 999
 - Live preview shows combined value like "1.050 KD"
 - Eliminates decimal-point entry mistakes
+
+---
+Task ID: 17
+Agent: Main
+Task: Fix ReferenceError: Cannot access 'q' before initialization
+
+Work Log:
+- Root cause: `handleFieldChange` was defined as a `const` arrow function AFTER the `useCallback` hooks (`handlePriceDinarChange`, `handlePriceFilsChange`) that referenced it in their dependency arrays
+- In the minified production build, `handleFieldChange` was renamed to `q`, and accessing a `const` before its declaration triggers "Cannot access 'q' before initialization" (temporal dead zone)
+- Fix: Moved `checkDuplicates` and `handleFieldChange` definitions to BEFORE the price handler useCallbacks
+- Changed `handleFieldChange` from a plain arrow function to a `useCallback` for consistency and to avoid stale closures
+- Added proper dependency array: `[checkDuplicates, formData.ndNumber, formData.barcode]`
+- Built and deployed successfully
+
+Stage Summary:
+- Source file: src/components/inventory/product-form.tsx
+- Error cause: `const handleFieldChange` referenced in useCallback dependency arrays before its declaration
+- Fix: Reordered declarations so handleFieldChange and checkDuplicates are defined before the price handlers that depend on them
