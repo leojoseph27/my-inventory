@@ -329,14 +329,14 @@ export function ProductForm({ mode }: ProductFormProps) {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="price">Price</Label>
+              <Label htmlFor="price">Price (KD)</Label>
               <Input
                 id="price"
                 type="number"
                 step="0.001"
                 value={formData.price}
                 onChange={(e) => handleFieldChange('price', e.target.value)}
-                placeholder="0.000"
+                placeholder="0.000 KD"
                 className="h-11"
               />
             </div>

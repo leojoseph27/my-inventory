@@ -15,7 +15,7 @@ import {
   Ruler,
   Tag,
   MapPin,
-  DollarSign,
+  Coins,
   Hash,
   Info,
 } from 'lucide-react';
@@ -212,7 +212,7 @@ export function ProductDetail() {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <InfoRow icon={Hash} label="Sr No." value={product.sr?.toString()} />
-            <InfoRow icon={DollarSign} label="Price" value={product.price != null ? product.price.toFixed(3) : null} />
+            <InfoRow icon={Coins} label="Price (KD)" value={product.price != null ? `${product.price.toFixed(3)} KD` : null} />
             <InfoRow icon={Tag} label="ND Number" value={product.ndNumber} />
             <InfoRow icon={Tag} label="Barcode" value={product.barcode} />
             <InfoRow icon={MapPin} label="Made In" value={product.made} />

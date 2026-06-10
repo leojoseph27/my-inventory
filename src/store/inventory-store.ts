@@ -2,6 +2,9 @@ import { create } from 'zustand';
 
 export type ViewMode = 'dashboard' | 'products' | 'add-product' | 'edit-product' | 'product-detail' | 'import' | 'filters';
 
+export type SortBy = 'sr' | 'nd_number' | 'english_description' | 'recently_updated' | 'recently_added';
+export type SortOrder = 'asc' | 'desc';
+
 export interface ProductImage {
   id: string;
   productId: string;
@@ -30,6 +33,11 @@ export interface Product {
   createdAt: string;
   updatedAt: string;
   images: ProductImage[];
+}
+
+export interface NdGroup {
+  ndNumber: string;
+  count: number;
 }
 
 export interface DashboardStats {
@@ -71,6 +79,16 @@ interface InventoryState {
   filterPriceMin: string;
   filterPriceMax: string;
 
+  // Sort
+  sortBy: SortBy;
+  sortOrder: SortOrder;
+
+  // ND Number Groups
+  groupByNd: boolean;
+  ndGroups: NdGroup[];
+  expandedGroups: Set<string>;
+  selectedNdNumber: string;
+
   // Loading states
   isLoading: boolean;
   isSaving: boolean;
@@ -94,6 +112,12 @@ interface InventoryState {
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setDuplicates: (duplicates: DuplicateCheck | null) => void;
   setCurrentPage: (page: number) => void;
+  setSortBy: (sortBy: SortBy) => void;
+  setSortOrder: (sortOrder: SortOrder) => void;
+  setGroupByNd: (enabled: boolean) => void;
+  setNdGroups: (groups: NdGroup[]) => void;
+  toggleGroup: (ndNumber: string) => void;
+  setSelectedNdNumber: (ndNumber: string) => void;
 }
 
 export const useInventoryStore = create<InventoryState>((set, get) => ({
@@ -121,6 +145,16 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
   filterMade: '',
   filterPriceMin: '',
   filterPriceMax: '',
+
+  // Sort
+  sortBy: 'sr',
+  sortOrder: 'asc',
+
+  // ND Number Groups
+  groupByNd: false,
+  ndGroups: [],
+  expandedGroups: new Set<string>(),
+  selectedNdNumber: '',
 
   // Loading states
   isLoading: false,
@@ -151,4 +185,18 @@ export const useInventoryStore = create<InventoryState>((set, get) => ({
   setSaveStatus: (status) => set({ saveStatus: status }),
   setDuplicates: (duplicates) => set({ duplicates }),
   setCurrentPage: (page) => set({ currentPage: page }),
+  setSortBy: (sortBy) => set({ sortBy, currentPage: 1 }),
+  setSortOrder: (sortOrder) => set({ sortOrder, currentPage: 1 }),
+  setGroupByNd: (enabled) => set({ groupByNd: enabled, currentPage: 1 }),
+  setNdGroups: (groups) => set({ ndGroups: groups }),
+  toggleGroup: (ndNumber) => set((state) => {
+    const next = new Set(state.expandedGroups);
+    if (next.has(ndNumber)) {
+      next.delete(ndNumber);
+    } else {
+      next.add(ndNumber);
+    }
+    return { expandedGroups: next };
+  }),
+  setSelectedNdNumber: (ndNumber) => set({ selectedNdNumber: ndNumber, currentPage: 1 }),
 }));

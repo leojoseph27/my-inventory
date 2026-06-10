@@ -32,10 +32,76 @@ function normalizeJsonField(value: any): string | null {
   return null;
 }
 
+/**
+ * Valid sort columns mapped to Supabase column names.
+ */
+const SORT_COLUMNS: Record<string, string> = {
+  'nd_number': 'nd_number',
+  'english_description': 'english_description',
+  'recently_updated': 'updated_at',
+  'recently_added': 'created_at',
+  'sr': 'sr',
+  'price': 'price',
+};
+
 export async function GET(request: NextRequest) {
   try {
     const supabase = createAdminClient();
     const { searchParams } = new URL(request.url);
+    const mode = searchParams.get('mode') || '';
+
+    // ── ND Groups mode ──
+    // Returns aggregated list of nd_number values with product counts.
+    if (mode === 'nd-groups') {
+      const search = searchParams.get('search') || '';
+      let query = supabase
+        .from('products')
+        .select('nd_number')
+        .not('nd_number', 'is', null);
+
+      if (search) {
+        query = query.ilike('nd_number', `%${search}%`);
+      }
+
+      // Fetch all nd_number values (paginated to handle >1000 rows)
+      const allRows: { nd_number: string }[] = [];
+      let offset = 0;
+      const batchSize = 1000;
+      let hasMore = true;
+
+      while (hasMore) {
+        const { data, error } = await query.range(offset, offset + batchSize - 1);
+
+        if (error) {
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+
+        if (!data || data.length === 0) {
+          hasMore = false;
+        } else {
+          allRows.push(...data);
+          hasMore = data.length === batchSize;
+          offset += batchSize;
+        }
+      }
+
+      // Aggregate counts
+      const groupMap = new Map<string, number>();
+      for (const row of allRows) {
+        const nd = row.nd_number;
+        if (nd) {
+          groupMap.set(nd, (groupMap.get(nd) || 0) + 1);
+        }
+      }
+
+      const groups = Array.from(groupMap.entries())
+        .map(([ndNumber, count]) => ({ ndNumber, count }))
+        .sort((a, b) => b.count - a.count || a.ndNumber.localeCompare(b.ndNumber));
+
+      return NextResponse.json({ groups, totalGroups: groups.length });
+    }
+
+    // ── Normal product listing mode ──
     const search = searchParams.get('search') || '';
     const material = searchParams.get('material') || '';
     const colour = searchParams.get('colour') || '';
@@ -44,12 +110,19 @@ export async function GET(request: NextRequest) {
     const priceMax = searchParams.get('priceMax');
     const page = parseInt(searchParams.get('page') || '1');
     const limit = parseInt(searchParams.get('limit') || '50');
+    const sortBy = searchParams.get('sortBy') || 'sr';
+    const sortOrder = searchParams.get('sortOrder') || 'asc';
+    const ndNumber = searchParams.get('ndNumber') || '';
+
+    // Resolve sort column
+    const sortColumn = SORT_COLUMNS[sortBy] || 'sr';
+    const sortAscending = sortOrder === 'asc';
 
     // Build the query
     let query = supabase
       .from('products')
       .select('*, product_images(*)', { count: 'exact' })
-      .order('sr', { ascending: true, nullsFirst: true })
+      .order(sortColumn, { ascending: sortAscending, nullsFirst: true })
       .range((page - 1) * limit, page * limit - 1);
 
     // Search filter (OR across multiple fields)
@@ -57,6 +130,11 @@ export async function GET(request: NextRequest) {
       query = query.or(
         `nd_number.ilike.%${search}%,barcode.ilike.%${search}%,english_description.ilike.%${search}%,arabic_description.ilike.%${search}%,materials.ilike.%${search}%,colours.ilike.%${search}%`
       );
+    }
+
+    // Filter by specific ND Number (for grouping)
+    if (ndNumber) {
+      query = query.eq('nd_number', ndNumber);
     }
 
     if (material) {
