@@ -83,3 +83,33 @@ Stage Summary:
 - Sort by any column works correctly
 - ND Number filter returns all products sharing that ND Number
 - All features tested via API calls
+
+---
+Task ID: 3
+Agent: Main
+Task: Fix image upload 405 error — create missing upload route and test end-to-end
+
+Work Log:
+- Investigated 405 error: POST /api/images/upload was being caught by [id] dynamic route (id="upload"), which only exports DELETE and PATCH
+- Root cause: src/app/api/images/upload/route.ts did NOT exist
+- Discovered product-images bucket was not public — made it public via Supabase Storage API (PUT /storage/v1/bucket/product-images)
+- Created src/app/api/images/upload/route.ts with POST handler implementing full workflow:
+  1. Parse FormData (file, productId, isPrimary)
+  2. Validate file type (images only)
+  3. Upload to Supabase Storage bucket "product-images" at path {productId}/{timestamp}.ext
+  4. Auto-set as primary if first image for product
+  5. Get public URL from storage
+  6. Insert product_images record (product_id, image_url, display_order, is_primary)
+  7. Return mapped image record
+- product_images table schema: id (bigint), product_id (bigint), image_url (text), display_order (integer), is_primary (boolean), created_at (timestamptz)
+- Rebuilt and tested full E2E:
+  - Upload: 201 Created ✓
+  - Storage bucket file accessible: 200 ✓
+  - DB record exists with correct URL: ✓
+  - Product API returns linked image: ✓
+  - Delete cleanup: 200 ✓
+
+Stage Summary:
+- Image upload now works end-to-end
+- Bucket made public so images display in browser without signed URLs
+- Upload route handles: auto-primary, display_order, primary flag management, file type validation, cleanup on DB failure
