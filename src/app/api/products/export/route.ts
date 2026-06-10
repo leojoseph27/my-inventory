@@ -48,17 +48,25 @@ const COLUMN_DEFS: ColDef[] = [
 
 /**
  * Parse a JSON array field back to a comma-separated string for Excel.
+ * Handles both actual arrays (from proper JSONB) and JSON strings (legacy data).
+ * ["Red", "Blue"] → "Red, Blue"
  * '["Red","Blue"]' → "Red, Blue"
  */
-function jsonArrayToString(value: string | null | undefined): string {
+function jsonArrayToString(value: any): string {
   if (!value) return '';
-  try {
-    const arr = JSON.parse(value);
-    if (Array.isArray(arr)) return arr.join(', ');
-    return String(value);
-  } catch {
-    return String(value);
+  // Already an array (proper JSONB)
+  if (Array.isArray(value)) return value.join(', ');
+  // String (legacy JSONB-as-string or text column)
+  if (typeof value === 'string') {
+    try {
+      const arr = JSON.parse(value);
+      if (Array.isArray(arr)) return arr.join(', ');
+      return String(value);
+    } catch {
+      return String(value);
+    }
   }
+  return String(value);
 }
 
 /**

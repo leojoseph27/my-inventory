@@ -52,11 +52,23 @@ export function ProductForm({ mode }: ProductFormProps) {
   const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastSavedDataRef = useRef<string>('');
 
+  // Helper: safely parse a value that might be a JSON string, an array, or null
+  const safeParseArray = (value: string | null | any[]): string[] => {
+    if (!value) return [];
+    if (Array.isArray(value)) return value;
+    try {
+      const arr = JSON.parse(value);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  };
+
   useEffect(() => {
     if (mode === 'edit' && currentProduct) {
-      const colours = currentProduct.colours ? JSON.parse(currentProduct.colours) : [];
-      const materials = currentProduct.materials ? JSON.parse(currentProduct.materials) : [];
-      const additionalInfo = currentProduct.additionalInfo ? JSON.parse(currentProduct.additionalInfo) : [];
+      const colours = safeParseArray(currentProduct.colours);
+      const materials = safeParseArray(currentProduct.materials);
+      const additionalInfo = safeParseArray(currentProduct.additionalInfo);
 
       setFormData({
         sr: currentProduct.sr?.toString() || '',

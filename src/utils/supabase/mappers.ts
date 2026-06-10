@@ -39,9 +39,26 @@ export function toCamelCase<T extends Record<string, any>>(obj: T): Record<strin
 /**
  * Converts a Supabase product row (snake_case) to the camelCase format
  * expected by the frontend.
+ *
+ * IMPORTANT: JSONB columns (colours, materials, additional_info) are stored
+ * as proper JSONB arrays in PostgreSQL. When read back, Supabase returns them
+ * as JavaScript arrays (e.g., ["Steel","Plastic"]). The frontend expects
+ * JSON strings (e.g., '["Steel","Plastic"]'). This mapper serializes them
+ * back to strings so the frontend's JSON.parse() calls continue to work.
  */
 export function mapProductFromDb(row: any): any {
   if (!row) return null;
+
+  // Serialize JSONB arrays back to JSON strings for frontend compatibility.
+  // The frontend uses JSON.parse() on these fields, so they must be strings.
+  // If the value is null or a string (backward compat with old data), pass through.
+  const serializeJsonb = (value: any): string | null => {
+    if (value === null || value === undefined) return null;
+    if (Array.isArray(value)) return JSON.stringify(value);
+    if (typeof value === 'string') return value; // backward compat with string-stored data
+    return JSON.stringify(value);
+  };
+
   const product = {
     id: row.id,
     sr: row.sr,
@@ -49,13 +66,13 @@ export function mapProductFromDb(row: any): any {
     arabicDescription: row.arabic_description,
     ndNumber: row.nd_number,
     barcode: row.barcode,
-    colours: row.colours,
+    colours: serializeJsonb(row.colours),
     length: row.length,
     width: row.width,
     height: row.height,
     made: row.made,
-    materials: row.materials,
-    additionalInfo: row.additional_info,
+    materials: serializeJsonb(row.materials),
+    additionalInfo: serializeJsonb(row.additional_info),
     price: row.price,
     pcs: row.pcs,
     photo: row.photo,

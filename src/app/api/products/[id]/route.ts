@@ -3,25 +3,37 @@ import { createAdminClient } from '@/utils/supabase/server';
 import { mapProductFromDb, mapProductToDb } from '@/utils/supabase/mappers';
 
 /**
- * Ensures array-like fields are stored as JSON strings in Supabase.
- * Handles both arrays (from frontend form) and strings (from API/Excel).
+ * Normalizes array-like fields for JSONB columns in Supabase.
+ *
+ * IMPORTANT: Supabase JSONB columns require actual JavaScript arrays/objects,
+ * NOT JSON strings. Passing '["Red","Blue"]' (a string) to a JSONB column
+ * causes PostgreSQL to store it as a text string inside JSONB, which breaks
+ * queries and exports. We must pass ["Red","Blue"] (actual array).
+ *
+ * Handles:
+ * - Array (from frontend form) → pass through as-is
+ * - String that looks like JSON → parse to array
+ * - Comma-separated string → parse to array
+ * - null/undefined/empty → null
  */
-function normalizeJsonField(value: any): string | null {
+function normalizeJsonField(value: any): any[] | null {
   if (value === null || value === undefined || value === '') return null;
   if (Array.isArray(value)) {
-    return value.length > 0 ? JSON.stringify(value) : null;
+    return value.length > 0 ? value : null;
   }
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (!trimmed) return null;
+    // Already a JSON array string? Parse it to an actual array
     if (trimmed.startsWith('[')) {
       try {
         const parsed = JSON.parse(trimmed);
-        if (Array.isArray(parsed)) return trimmed;
+        if (Array.isArray(parsed)) return parsed.length > 0 ? parsed : null;
       } catch {}
     }
+    // Comma/semicolon separated values → parse to array
     const items = trimmed.split(/[,;|]/).map(v => v.trim()).filter(Boolean);
-    return items.length > 0 ? JSON.stringify(items) : null;
+    return items.length > 0 ? items : null;
   }
   return null;
 }

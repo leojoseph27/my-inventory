@@ -57,8 +57,9 @@ export function ProductDetail() {
     );
   }
 
-  const parseJsonArray = (value: string | null): string[] => {
+  const parseJsonArray = (value: string | null | any[]): string[] => {
     if (!value) return [];
+    if (Array.isArray(value)) return value;
     try {
       const arr = JSON.parse(value);
       return Array.isArray(arr) ? arr : [];

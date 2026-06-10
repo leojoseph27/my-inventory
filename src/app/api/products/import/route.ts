@@ -239,29 +239,35 @@ function buildColumnMapping(
 }
 
 /**
- * Parse a multi-value field into a JSON array string.
- * "Red, Blue, Green" → '["Red","Blue","Green"]'
+ * Parse a multi-value field into a proper JavaScript array for JSONB columns.
+ * "Red, Blue, Green" → ["Red", "Blue", "Green"]
+ *
+ * IMPORTANT: Supabase JSONB columns require actual JavaScript arrays,
+ * NOT JSON strings. Passing '["Red","Blue"]' (a string) to a JSONB column
+ * causes PostgreSQL to store it as a text string inside JSONB, which breaks
+ * queries and exports.
+ *
  * Returns null for empty/missing values.
  */
-function parseArrayField(value: any): string | null {
+function parseArrayField(value: any): any[] | null {
   if (value === null || value === undefined || value === '') return null;
   if (Array.isArray(value)) {
     const filtered = value.filter(v => String(v).trim());
-    return filtered.length > 0 ? JSON.stringify(filtered) : null;
+    return filtered.length > 0 ? filtered : null;
   }
   const str = String(value).trim();
   if (!str) return null;
-  // Already a JSON array string? Validate and pass through
+  // Already a JSON array string? Parse to actual array
   if (str.startsWith('[')) {
     try {
       const parsed = JSON.parse(str);
-      if (Array.isArray(parsed) && parsed.length > 0) return JSON.stringify(parsed);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       if (Array.isArray(parsed) && parsed.length === 0) return null;
     } catch { /* fall through to comma-split */ }
   }
   // Split by comma, semicolon, or pipe
   const items = str.split(/[,;|]/).map(v => v.trim()).filter(Boolean);
-  return items.length > 0 ? JSON.stringify(items) : null;
+  return items.length > 0 ? items : null;
 }
 
 function toNumber(value: any): number | null {
