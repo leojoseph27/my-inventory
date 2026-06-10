@@ -33,3 +33,22 @@ Stage Summary:
 - Product display: Cards now show dimensions, materials, made-in, pcs
 - All 8 Supabase operations verified working via direct API test
 - Sample Excel file at /home/z/my-project/download/sample_import.xlsx
+
+---
+Task ID: 1
+Agent: Main
+Task: Fix dashboard stats - verify and correct Missing Images and Missing Dimensions counts
+
+Work Log:
+- Read stats API route (src/app/api/products/stats/route.ts) and dashboard component
+- Ran verification queries directly against Supabase REST API
+- Found critical bug: both Missing Images and Missing Dimensions queries used .select() to fetch ALL rows into memory, then counted in JS. Supabase's default page size is 1000, so with 1732 products only 1000 rows were returned, giving wrong counts of 1000 instead of 1732
+- Fixed by using DB-level counting: count: 'exact' with head: true for all metrics
+- Missing Images: uses inner join on product_images, then subtracts from total (total - productsWithImages)
+- Missing Dimensions: counts products with all 3 dims NOT NULL, then subtracts from total
+- Rebuilt app, cleared cache, restarted server, verified correct counts
+
+Stage Summary:
+- Dashboard now shows correct numbers: Missing Images = 1732, Missing Dimensions = 1732
+- Root cause: Supabase REST API default 1000-row limit silently truncated .select() queries
+- Fix: replaced in-memory JS filtering with database-level count queries using Content-Range header
