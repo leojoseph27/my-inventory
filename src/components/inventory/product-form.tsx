@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { MultiValueInput } from './multi-value-input';
 import { SearchableMultiSelect } from './searchable-multi-select';
+import { SearchableSingleSelect } from './searchable-single-select';
 import { ImageGallery } from './image-gallery';
 import { BarcodeScanner } from './barcode-scanner';
 import { useInventoryStore, Product, DuplicateCheck } from '@/store/inventory-store';
@@ -51,9 +52,11 @@ export function ProductForm({ mode }: ProductFormProps) {
 
   const [colourSuggestions, setColourSuggestions] = useState<string[]>([]);
   const [materialSuggestions, setMaterialSuggestions] = useState<string[]>([]);
+  const [madeSuggestions, setMadeSuggestions] = useState<string[]>([]);
   // ── Custom values added via "+" button (persisted in localStorage) ──
   const [customColours, setCustomColours] = useState<string[]>([]);
   const [customMaterials, setCustomMaterials] = useState<string[]>([]);
+  const [customCountries, setCustomCountries] = useState<string[]>([]);
 
   // ── Predefined common values (always available in the dropdown) ──────
   // These merge with whatever values exist in the database.
@@ -70,6 +73,12 @@ export function ProductForm({ mode }: ProductFormProps) {
     'Steel', 'Stone', 'Wood',
   ];
 
+  const DEFAULT_COUNTRIES = [
+    'Turkey', 'Germany', 'China', 'Italy', 'Poland', 'Hungary',
+    'Netherlands', 'India', 'Ukraine', 'Slovakia', 'Spain',
+    'Kuwait', 'UAE', 'Saudi Arabia',
+  ];
+
   // Merge: DB values ∪ predefined defaults ∪ custom localStorage values ∪ locally-selected values
   const mergedColourSuggestions = useMemo(() => {
     const set = new Set([...DEFAULT_COLOURS, ...colourSuggestions, ...customColours, ...formData.colours]);
@@ -80,6 +89,12 @@ export function ProductForm({ mode }: ProductFormProps) {
     const set = new Set([...DEFAULT_MATERIALS, ...materialSuggestions, ...customMaterials, ...formData.materials]);
     return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   }, [materialSuggestions, customMaterials, formData.materials]);
+
+  // Merge: predefined defaults ∪ custom localStorage countries ∪ DB-made values ∪ current selection
+  const mergedCountrySuggestions = useMemo(() => {
+    const set = new Set([...DEFAULT_COUNTRIES, ...customCountries, ...madeSuggestions, formData.made].filter(Boolean));
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [customCountries, madeSuggestions, formData.made]);
 
   const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastSavedDataRef = useRef<string>('');
@@ -96,7 +111,7 @@ export function ProductForm({ mode }: ProductFormProps) {
     }
   };
 
-  // Load custom colours/materials from localStorage on mount
+  // Load custom colours/materials/countries from localStorage on mount
   useEffect(() => {
     try {
       const storedColours = localStorage.getItem('customColours');
@@ -106,6 +121,10 @@ export function ProductForm({ mode }: ProductFormProps) {
       const storedMaterials = localStorage.getItem('customMaterials');
       if (storedMaterials) {
         try { setCustomMaterials(JSON.parse(storedMaterials)); } catch { /* ignore bad data */ }
+      }
+      const storedCountries = localStorage.getItem('customCountries');
+      if (storedCountries) {
+        try { setCustomCountries(JSON.parse(storedCountries)); } catch { /* ignore bad data */ }
       }
     } catch { /* localStorage may not be available */ }
   }, []);
@@ -119,6 +138,7 @@ export function ProductForm({ mode }: ProductFormProps) {
           const data = await res.json();
           setColourSuggestions(data.colours || []);
           setMaterialSuggestions(data.materials || []);
+          setMadeSuggestions(data.made || []);
         }
       } catch (error) {
         console.error('Error fetching suggestions:', error);
@@ -145,6 +165,17 @@ export function ProductForm({ mode }: ProductFormProps) {
       if (prev.some(v => v.toLowerCase() === value.toLowerCase())) return prev;
       const updated = [...prev, value];
       try { localStorage.setItem('customMaterials', JSON.stringify(updated)); } catch { /* */ }
+      return updated;
+    });
+  }, []);
+
+  // ── Persist new custom country to localStorage ──
+  const handleNewCountryPersist = useCallback((value: string) => {
+    setCustomCountries(prev => {
+      // Avoid duplicates (case-insensitive)
+      if (prev.some(v => v.toLowerCase() === value.toLowerCase())) return prev;
+      const updated = [...prev, value];
+      try { localStorage.setItem('customCountries', JSON.stringify(updated)); } catch { /* */ }
       return updated;
     });
   }, []);
@@ -489,16 +520,16 @@ export function ProductForm({ mode }: ProductFormProps) {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="made">Made In</Label>
-            <Input
-              id="made"
-              value={formData.made}
-              onChange={(e) => handleFieldChange('made', e.target.value)}
-              placeholder="China"
-              className="h-11"
-            />
-          </div>
+          <SearchableSingleSelect
+            label="Made In"
+            value={formData.made}
+            onChange={(value) => handleFieldChange('made', value)}
+            suggestions={mergedCountrySuggestions}
+            placeholder="Search country..."
+            emptyMessage="No country found."
+            allowAddNew
+            onNewValuePersist={handleNewCountryPersist}
+          />
         </CardContent>
       </Card>
 

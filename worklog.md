@@ -43,3 +43,28 @@ Stage Summary:
 - Custom values persist in localStorage and appear in future dropdowns
 - Existing searchable dropdown, autocomplete, and multi-select behaviors preserved
 - Additional Info field unchanged
+
+---
+Task ID: 15
+Agent: Main
+Task: Replace Made In free-text field with searchable autocomplete dropdown
+
+Work Log:
+- Created new SearchableSingleSelect component (single-select variant of SearchableMultiSelect)
+- Features: searchable dropdown, case-insensitive search, clear button (×), "+" button for custom values
+- Single-select behavior: selecting a new value replaces the previous one
+- Added DEFAULT_COUNTRIES list: Turkey, Germany, China, Italy, Poland, Hungary, Netherlands, India, Ukraine, Slovakia, Spain, Kuwait, UAE, Saudi Arabia
+- Added madeSuggestions state + mergedCountrySuggestions useMemo (defaults ∪ DB ∪ custom ∪ current)
+- Added customCountries state with localStorage persistence (key: customCountries)
+- Added handleNewCountryPersist callback for localStorage persistence
+- Updated suggestions API to also fetch and return `made` column values
+- Replaced free-text <Input> for Made In with <SearchableSingleSelect>
+- No changes to Colour, Material, or Additional Info fields
+- Built and deployed successfully
+
+Stage Summary:
+- Made In is now a searchable autocomplete dropdown with 14 default countries
+- "+" button allows adding custom countries (e.g., Vietnam) that persist in localStorage
+- Search is case-insensitive (germany/Germany/GERMANY all match)
+- Only one country can be selected at a time (single-select)
+- Excel import/export unchanged — made field remains a string in the database
