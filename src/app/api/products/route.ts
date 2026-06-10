@@ -202,23 +202,50 @@ export async function GET(request: NextRequest) {
 
     /**
      * Helper: apply common filters (material, colour, made, price) to a query.
-     * Note: materials and colours are JSONB columns — ilike doesn't work on them.
-     * We use textSearch with 'plain' config or filter by casting to text.
-     * For simplicity, we use .contains() which does exact JSONB containment.
+     *
+     * NOTE on JSONB filtering (materials, colours):
+     * - The `cs` (contains, @>) operator is case-sensitive: '"blue"' won't match '["Blue"]'.
+     * - PostgreSQL's `ilike` doesn't work on JSONB columns directly.
+     * - For text columns (made), ilike works natively and is case-insensitive.
+     *
+     * Strategy for JSONB fields:
+     * - We do NOT apply JSONB filters at the database level.
+     * - Instead, we fetch all rows that match the other filters,
+     *   then filter JSONB fields (colour, material) in JavaScript with
+     *   case-insensitive matching.
+     * - This is acceptable because the other filters (search, made, price)
+     *   already narrow down the result set significantly.
      */
     const applyCommonFilters = (q: any) => {
-      if (material) {
-        // JSONB containment: searches for the material string within the JSON array
-        // e.g., materials @> '"Plastic"' matches ["Plastic", "Glass"]
-        q = q.filter('materials', 'cs', `"${material}"`);
-      }
-      if (colour) {
-        q = q.filter('colours', 'cs', `"${colour}"`);
-      }
+      // JSONB filters (colour, material) are applied post-fetch in JS — see below
       if (made) q = q.ilike('made', `%${made}%`);
       if (priceMin) q = q.gte('price', parseFloat(priceMin));
       if (priceMax) q = q.lte('price', parseFloat(priceMax));
       return q;
+    };
+
+    /**
+     * Case-insensitive JSONB array filter.
+     * Checks if any value in the JSONB array contains the search string,
+     * ignoring case. Handles both parsed arrays and JSON strings.
+     */
+    const jsonbContainsIgnoreCase = (fieldValue: any, searchTerm: string): boolean => {
+      if (!fieldValue || !searchTerm) return false;
+      const searchLower = searchTerm.toLowerCase().trim();
+      let arr: string[];
+      if (Array.isArray(fieldValue)) {
+        arr = fieldValue;
+      } else if (typeof fieldValue === 'string') {
+        try {
+          const parsed = JSON.parse(fieldValue);
+          arr = Array.isArray(parsed) ? parsed : [fieldValue];
+        } catch {
+          arr = fieldValue.split(/[,;|]/);
+        }
+      } else {
+        return false;
+      }
+      return arr.some(v => String(v).toLowerCase().trim().includes(searchLower));
     };
 
     // ── When searching: use two-query approach to guarantee ND number matches appear first ──
@@ -256,7 +283,12 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: countResult.error.message }, { status: 500 });
       }
 
-      const ndProducts = (ndResult.data || []).map(mapProductFromDb);
+      let ndProducts = (ndResult.data || []).map(mapProductFromDb);
+
+      // Apply case-insensitive JSONB filters
+      if (colour) ndProducts = ndProducts.filter(p => jsonbContainsIgnoreCase(p.colours, colour));
+      if (material) ndProducts = ndProducts.filter(p => jsonbContainsIgnoreCase(p.materials, material));
+
       const ndCount = ndProducts.length;
       const totalCount = countResult.count || 0;
 
@@ -306,6 +338,10 @@ export async function GET(request: NextRequest) {
           return NextResponse.json({ error: nonNdError.message }, { status: 500 });
         }
         otherProducts = (nonNdData || []).map(mapProductFromDb);
+
+        // Apply case-insensitive JSONB filters to non-ND results
+        if (colour) otherProducts = otherProducts.filter(p => jsonbContainsIgnoreCase(p.colours, colour));
+        if (material) otherProducts = otherProducts.filter(p => jsonbContainsIgnoreCase(p.materials, material));
       }
 
       // Combine: ND matches for this page first, then non-ND matches
@@ -315,6 +351,50 @@ export async function GET(request: NextRequest) {
     }
 
     // ── No search (or ndNumber filter): standard paginated query ──
+    // When JSONB filters (colour/material) are active, we need to handle
+    // pagination differently because DB-level count/pagination doesn't
+    // account for JS-level filtering.
+    if (colour || material) {
+      // Fetch a larger batch and filter in JS, then paginate manually
+      const fetchLimit = 2000; // fetch enough to cover typical filter results
+      let query = supabase
+        .from('products')
+        .select('*, product_images(*)')
+        .order(sortColumn, { ascending: sortAscending, nullsFirst: true })
+        .limit(fetchLimit);
+      query = applyCommonFilters(query);
+
+      if (search) {
+        query = query.or(
+          `nd_number.ilike.%${search}%,barcode.ilike.%${search}%,english_description.ilike.%${search}%,arabic_description.ilike.%${search}%`
+        );
+      }
+      if (ndNumber) {
+        query = query.ilike('nd_number', ndNumber);
+      }
+
+      const { data: allData, error: allError } = await query;
+
+      if (allError) {
+        console.error('Supabase error fetching products:', allError);
+        return NextResponse.json({ error: allError.message }, { status: 500 });
+      }
+
+      let allProducts = (allData || []).map(mapProductFromDb);
+
+      // Apply case-insensitive JSONB filters
+      if (colour) allProducts = allProducts.filter(p => jsonbContainsIgnoreCase(p.colours, colour));
+      if (material) allProducts = allProducts.filter(p => jsonbContainsIgnoreCase(p.materials, material));
+
+      const total = allProducts.length;
+      const pageStart = (page - 1) * limit;
+      const pageEnd = page * limit;
+      const products = allProducts.slice(pageStart, pageEnd);
+
+      return NextResponse.json({ products, total, page, limit });
+    }
+
+    // ── Standard path (no JSONB filters) ──
     let query = supabase
       .from('products')
       .select('*, product_images(*)', { count: 'exact' })
@@ -322,16 +402,15 @@ export async function GET(request: NextRequest) {
       .range((page - 1) * limit, page * limit - 1);
 
     // Search filter (OR across text fields) — only when ndNumber filter is used with search
-    // Note: materials/colours are JSONB columns, ilike doesn't work on them
     if (search) {
       query = query.or(
         `nd_number.ilike.%${search}%,barcode.ilike.%${search}%,english_description.ilike.%${search}%,arabic_description.ilike.%${search}%`
       );
     }
 
-    // Filter by specific ND Number (for grouping)
+    // Filter by specific ND Number (for grouping) — case-insensitive
     if (ndNumber) {
-      query = query.eq('nd_number', ndNumber);
+      query = query.ilike('nd_number', ndNumber);
     }
 
     query = applyCommonFilters(query);
