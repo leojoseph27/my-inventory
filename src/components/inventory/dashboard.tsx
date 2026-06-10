@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useInventoryStore, DashboardStats } from '@/store/inventory-store';
@@ -14,10 +14,25 @@ import {
   Upload,
   Download,
   Search,
+  Trash2,
+  Loader2,
 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+import { toast } from 'sonner';
 
 export function Dashboard() {
   const { setView, stats, setStats, setLoading } = useInventoryStore();
+  const [isClearing, setIsClearing] = useState(false);
 
   useEffect(() => {
     loadStats();
@@ -183,14 +198,75 @@ export function Dashboard() {
           </CardContent>
         </Card>
       ) : (
-        <Button
-          variant="outline"
-          className="w-full h-14 text-base"
-          onClick={() => setView('products')}
-        >
-          <Package className="h-5 w-5 mr-2" />
-          Browse All Products ({stats?.totalProducts ?? 0})
-        </Button>
+        <div className="space-y-3">
+          <Button
+            variant="outline"
+            className="w-full h-14 text-base"
+            onClick={() => setView('products')}
+          >
+            <Package className="h-5 w-5 mr-2" />
+            Browse All Products ({stats?.totalProducts ?? 0})
+          </Button>
+
+          {/* Clear All Data */}
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                variant="ghost"
+                className="w-full text-destructive hover:text-destructive hover:bg-destructive/10 h-10 text-sm"
+                disabled={isClearing}
+              >
+                {isClearing ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Clearing all data...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Clear All Products & Start Over
+                  </>
+                )}
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete all products?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will permanently delete <strong>all {stats?.totalProducts ?? 0} products</strong>,
+                  all product images from the database, and all image files from storage.
+                  This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  onClick={async () => {
+                    setIsClearing(true);
+                    try {
+                      const res = await fetch('/api/products/cleanup?mode=all', { method: 'DELETE' });
+                      if (res.ok) {
+                        const data = await res.json();
+                        toast.success(data.message || 'All data cleared');
+                        // Refresh stats to show zeros
+                        await loadStats();
+                      } else {
+                        toast.error('Failed to clear data');
+                      }
+                    } catch {
+                      toast.error('Failed to clear data');
+                    } finally {
+                      setIsClearing(false);
+                    }
+                  }}
+                >
+                  Yes, delete everything
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       )}
     </div>
   );
