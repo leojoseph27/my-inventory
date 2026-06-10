@@ -7,7 +7,7 @@ import * as XLSX from 'xlsx';
  *
  * Recreates the user's Excel template format:
  *
- *   Row 1: sr | English Description | Arabic Description | ND Number | barcode | Colour | SIZE mm | Made | Material | Additional INFO | PRICE | Pcs | Photo | Images
+ *   Row 1: sr | English Description | Arabic Description | ND Number | barcode | Colour | SIZE mm | Made | Material | Additional INFO | PRICE | Pcs | Images
  *   Row 2:    |                     |                     |           |         |         | L | W | H      |         |                 |       |     |       |
  *
  * "SIZE mm" spans 3 columns (L, W, H) as a merged cell.
@@ -42,7 +42,6 @@ const COLUMN_DEFS: ColDef[] = [
   { header1: 'Additional INFO', header2: '', dbField: 'additional_info', isJsonArray: true },
   { header1: 'PRICE', header2: '', dbField: 'price' },
   { header1: 'Pcs', header2: '', dbField: 'pcs' },
-  { header1: 'Photo', header2: '', dbField: 'photo' },
   { header1: 'Images', header2: '', dbField: 'product_images_urls', isVirtual: true },
 ];
 
@@ -212,7 +211,6 @@ export async function GET() {
       { wch: 25 },  // Additional INFO
       { wch: 10 },  // PRICE
       { wch: 6 },   // Pcs
-      { wch: 30 },  // Photo
       { wch: 50 },  // Images (uploaded image URLs)
     ];
 
