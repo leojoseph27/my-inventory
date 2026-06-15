@@ -460,7 +460,7 @@ export function ProductTable() {
           title="Scan Barcode"
         >
           <ScanBarcode className="h-5 w-5" />
-          <span className="text-xs hidden sm:inline">Scan</span>
+          <span className="text-xs">Scan</span>
         </Button>
         {/* Capture Barcode Photo Button */}
         <Button
@@ -471,7 +471,7 @@ export function ProductTable() {
           title="Capture Barcode Photo"
         >
           <Camera className="h-5 w-5" />
-          <span className="text-xs hidden sm:inline">Photo</span>
+          <span className="text-xs">Photo</span>
         </Button>
       </div>
 
