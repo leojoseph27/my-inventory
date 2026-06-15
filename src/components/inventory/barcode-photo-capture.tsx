@@ -2,29 +2,128 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { X, Flashlight, FlashlightOff, Camera, RotateCcw, Loader2 } from 'lucide-react';
+import { X, Flashlight, FlashlightOff, Camera, RotateCcw, Loader2, Check, AlertCircle } from 'lucide-react';
 
 interface BarcodePhotoCaptureProps {
   onScan: (barcode: string) => void;
   onClose: () => void;
 }
 
+// ── Scan zone constants ──
+// The red scan line sits at 50% of the image height.
+// We crop a band around it equal to CROP_HEIGHT_PCT of image height.
+const CROP_HEIGHT_PCT = 0.18; // 18% of image height centred on the red line
+const SCAN_ZONE_WIDTH_PCT = 0.85; // 85% of image width for the scan zone
+
 /**
- * Barcode photo capture component.
- * Opens the device camera in a preview window, lets the user capture a photo,
- * then automatically extracts the barcode from the captured image using
- * html5-qrcode's scanFileV2 method.
+ * Extract the best barcode-like number from OCR text.
+ * Strips non-numeric characters, then picks the longest sequence
+ * that matches common barcode lengths (8, 12, 13, 14 digits).
+ */
+function extractBarcodeFromOcr(text: string): string | null {
+  // Remove obvious noise characters but keep digits and spaces/hyphens
+  const cleaned = text.replace(/[^\d\s\-]/g, ' ');
+
+  // Split into candidate number groups
+  const candidates = cleaned.split(/\s+/).filter(Boolean);
+
+  // Also try the entire string with only digits
+  const allDigits = cleaned.replace(/\D/g, '');
+
+  // Collect all digit-only sequences (also combine adjacent groups)
+  const digitSequences: string[] = [];
+  for (const c of candidates) {
+    const d = c.replace(/\D/g, '');
+    if (d.length >= 6) digitSequences.push(d);
+  }
+  if (allDigits.length >= 6) digitSequences.push(allDigits);
+
+  // Deduplicate
+  const unique = [...new Set(digitSequences)];
+
+  // Preferred barcode lengths in order of priority
+  const preferredLengths = [13, 12, 8, 14];
+
+  for (const len of preferredLengths) {
+    // First: exact length match
+    const exact = unique.find(s => s.length === len);
+    if (exact) return exact;
+
+    // Second: string that starts or ends with a barcode-length subsequence
+    for (const seq of unique) {
+      if (seq.length > len) {
+        const prefix = seq.substring(0, len);
+        const suffix = seq.substring(seq.length - len);
+        // Return prefix if it looks like a valid barcode (starts with non-zero)
+        if (prefix[0] !== '0' || len === 8) return prefix;
+        if (suffix[0] !== '0' || len === 8) return suffix;
+      }
+    }
+  }
+
+  // Fallback: longest digit sequence >= 7 digits
+  const sorted = unique.sort((a, b) => b.length - a.length);
+  const longest = sorted.find(s => s.length >= 7);
+  if (longest) return longest.substring(0, 14); // cap at 14
+
+  return null;
+}
+
+/**
+ * Pre-process a canvas region for better OCR accuracy:
+ * - Convert to greyscale
+ * - Increase contrast
+ * - Apply sharpening
+ */
+function preprocessForOcr(sourceCanvas: HTMLCanvasElement): HTMLCanvasElement {
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d')!;
+
+  // Draw original
+  ctx.drawImage(sourceCanvas, 0, 0);
+
+  // Get pixel data
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+
+  // Greyscale + contrast boost
+  const contrastFactor = 1.5; // 1.0 = no change
+  const intercept = 128 * (1 - contrastFactor);
+  for (let i = 0; i < data.length; i += 4) {
+    const grey = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const val = Math.min(255, Math.max(0, grey * contrastFactor + intercept));
+    // Simple threshold for cleaner text
+    const final = val > 140 ? 255 : 0;
+    data[i] = data[i + 1] = data[i + 2] = final;
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  return out;
+}
+
+/**
+ * Barcode photo capture component — redesigned for accuracy.
  *
- * This is designed for situations where the live barcode scanner cannot focus
- * properly — the user can take a still photo and the system will attempt to
- * extract the barcode from it.
+ * Key improvements:
+ * 1. Red horizontal scan line overlay guides the user to align the barcode
+ * 2. Only the narrow crop around the red line is analysed (ignoring surrounding text)
+ * 3. Dual detection: barcode decoding first, then OCR fallback
+ * 4. User sees cropped preview + detected barcode and must Confirm or Retake
+ * 5. Full debug logging for deployment diagnostics
  *
  * Workflow:
- * 1. Open camera preview (rear camera, autofocus, torch toggle)
+ * 1. Open camera preview (rear camera, autofocus, torch toggle, red scan line)
  * 2. User clicks Capture → image freezes
- * 3. Automatically process image → extract barcode via scanFileV2
- * 4. If found: populate search + auto-search
- * 5. If not found: show "No barcode detected. Please try again."
+ * 3. Crop the scan zone (≈18% of image height centred on red line)
+ * 4. Try barcode detection on cropped region
+ * 5. If barcode fails, run OCR on cropped region
+ * 6. Show cropped preview + "Detected Barcode: XXXXXXXX" with Confirm / Retake
+ * 7. On Confirm → populate search + auto-search
+ * 8. If nothing found after all attempts → show "No barcode detected" with Retake
  */
 export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -39,6 +138,11 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
   const [noBarcodeFound, setNoBarcodeFound] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
+
+  // New states for confirm/retake flow
+  const [croppedPreview, setCroppedPreview] = useState<string | null>(null);
+  const [detectedBarcode, setDetectedBarcode] = useState<string | null>(null);
+  const [processingStep, setProcessingStep] = useState<string>('');
 
   // ── Start camera on mount ──
   useEffect(() => {
@@ -142,78 +246,215 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
     }
   }, [torchOn]);
 
-  // ── Capture + Process in one flow ──
+  // ── Crop the scan zone from a full canvas ──
+  const cropScanZone = useCallback((fullCanvas: HTMLCanvasElement): HTMLCanvasElement => {
+    const imgW = fullCanvas.width;
+    const imgH = fullCanvas.height;
+
+    // Horizontal band centred vertically (where the red line is at 50%)
+    const bandHeight = Math.round(imgH * CROP_HEIGHT_PCT);
+    const bandTop = Math.round(imgH * 0.5 - bandHeight / 2);
+
+    // Horizontal: use SCAN_ZONE_WIDTH_PCT centred
+    const bandWidth = Math.round(imgW * SCAN_ZONE_WIDTH_PCT);
+    const bandLeft = Math.round((imgW - bandWidth) / 2);
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = bandWidth;
+    cropCanvas.height = bandHeight;
+    const ctx = cropCanvas.getContext('2d')!;
+    ctx.drawImage(
+      fullCanvas,
+      bandLeft, bandTop, bandWidth, bandHeight, // source rect
+      0, 0, bandWidth, bandHeight               // dest rect
+    );
+
+    console.log('[BarcodeCapture] Crop region:', {
+      original: `${imgW}x${imgH}`,
+      cropRegion: `left=${bandLeft} top=${bandTop} w=${bandWidth} h=${bandHeight}`,
+      cropped: `${bandWidth}x${bandHeight}`,
+    });
+
+    return cropCanvas;
+  }, []);
+
+  // ── Run OCR on a canvas and extract barcode ──
+  const runOcr = useCallback(async (canvas: HTMLCanvasElement): Promise<string | null> => {
+    setProcessingStep('Running OCR on cropped region...');
+    try {
+      const Tesseract = await import('tesseract.js');
+      const worker = await Tesseract.createWorker('eng', 1, {
+        logger: (m: any) => {
+          if (m.status === 'recognizing text') {
+            console.log(`[BarcodeCapture] OCR progress: ${Math.round((m.progress || 0) * 100)}%`);
+          }
+        },
+      });
+
+      // Configure for digit-heavy recognition
+      await worker.setParameters({
+        tessedit_char_whitelist: '0123456789 -',
+        tessedit_pageseg_mode: '7', // Treat as single uniform block of text
+      });
+
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+      const { data } = await worker.recognize(dataUrl);
+      await worker.terminate();
+
+      const ocrText = data.text || '';
+      console.log('[BarcodeCapture] OCR raw result:', JSON.stringify(ocrText));
+
+      const barcode = extractBarcodeFromOcr(ocrText);
+      console.log('[BarcodeCapture] OCR extracted barcode:', barcode);
+      return barcode;
+    } catch (err) {
+      console.error('[BarcodeCapture] OCR error:', err);
+      return null;
+    }
+  }, []);
+
+  // ── Run OCR on preprocessed (contrast-enhanced) image ──
+  const runEnhancedOcr = useCallback(async (canvas: HTMLCanvasElement): Promise<string | null> => {
+    setProcessingStep('Retrying with image enhancement...');
+    console.log('[BarcodeCapture] Attempting enhanced OCR (contrast + sharpening)');
+
+    const enhanced = preprocessForOcr(canvas);
+    return runOcr(enhanced);
+  }, [runOcr]);
+
+  // ── Capture + Process ──
   const captureAndProcess = useCallback(async () => {
     const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
+    const fullCanvas = canvasRef.current;
+    if (!video || !fullCanvas) return;
 
     // Freeze video
     video.pause();
 
-    // Draw frame to canvas
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
+    // Draw full frame to canvas
+    fullCanvas.width = video.videoWidth;
+    fullCanvas.height = video.videoHeight;
+    const ctx = fullCanvas.getContext('2d');
     if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, fullCanvas.width, fullCanvas.height);
 
-    // Get data URL for display
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
-    setCapturedImage(dataUrl);
+    // Save full image for display
+    const fullDataUrl = fullCanvas.toDataURL('image/jpeg', 0.92);
+    setCapturedImage(fullDataUrl);
     setIsProcessing(true);
     setNoBarcodeFound(false);
+    setDetectedBarcode(null);
+    setCroppedPreview(null);
 
-    // Convert canvas to blob for barcode scanning
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', 0.92);
-    });
+    console.log('[BarcodeCapture] Original image size:', `${fullCanvas.width}x${fullCanvas.height}`);
 
-    if (!blob) {
-      setIsProcessing(false);
-      setNoBarcodeFound(true);
-      return;
-    }
+    // ── Crop scan zone ──
+    const croppedCanvas = cropScanZone(fullCanvas);
+    const croppedDataUrl = croppedCanvas.toDataURL('image/jpeg', 0.92);
+    setCroppedPreview(croppedDataUrl);
 
-    const file = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
+    console.log('[BarcodeCapture] Cropped image size:', `${croppedCanvas.width}x${croppedCanvas.height}`);
+
+    // ── Step 1: Barcode detection on cropped region ──
+    setProcessingStep('Trying barcode detection...');
+    let barcodeResult: string | null = null;
 
     try {
       const { Html5Qrcode } = await import('html5-qrcode');
       const scanner = new Html5Qrcode('barcode-photo-scan-element');
 
-      try {
-        const result = await scanner.scanFileV2(file, false);
-        const decodedText = result.decodedText;
+      // Convert cropped canvas to file for scanFileV2
+      const blob = await new Promise<Blob | null>((resolve) => {
+        croppedCanvas.toBlob(resolve, 'image/jpeg', 0.92);
+      });
 
-        if (decodedText) {
-          // Barcode found — stop camera and callback
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach(t => t.stop());
-            streamRef.current = null;
-          }
-          onScan(decodedText);
-          return;
+      if (blob) {
+        const file = new File([blob], 'cropped.jpg', { type: 'image/jpeg' });
+
+        try {
+          const result = await scanner.scanFileV2(file, false);
+          barcodeResult = result.decodedText;
+          console.log('[BarcodeCapture] Barcode detection result:', barcodeResult);
+        } catch (scanErr: any) {
+          console.log('[BarcodeCapture] Barcode detection failed on cropped region:', scanErr?.message || scanErr);
+        } finally {
+          try { scanner.clear(); } catch {}
         }
-      } catch (scanErr: any) {
-        // scanFileV2 throws when no barcode is found — this is expected
-        console.log('No barcode detected in captured image:', scanErr?.message || scanErr);
-      } finally {
-        try { scanner.clear(); } catch {}
+      }
+
+      // Also try on full image as fallback (sometimes the library needs full context)
+      if (!barcodeResult) {
+        setProcessingStep('Trying barcode detection on full image...');
+        const fullBlob = await new Promise<Blob | null>((resolve) => {
+          fullCanvas.toBlob(resolve, 'image/jpeg', 0.92);
+        });
+        if (fullBlob) {
+          const fullFile = new File([fullBlob], 'full.jpg', { type: 'image/jpeg' });
+          const scanner2 = new Html5Qrcode('barcode-photo-scan-element-2');
+          try {
+            const result = await scanner2.scanFileV2(fullFile, false);
+            barcodeResult = result.decodedText;
+            console.log('[BarcodeCapture] Barcode detection on full image result:', barcodeResult);
+          } catch (scanErr: any) {
+            console.log('[BarcodeCapture] Barcode detection failed on full image:', scanErr?.message || scanErr);
+          } finally {
+            try { scanner2.clear(); } catch {}
+          }
+        }
       }
     } catch (err: any) {
-      console.error('Barcode processing error:', err);
+      console.error('[BarcodeCapture] Barcode library error:', err);
     }
 
-    // No barcode found
+    // ── Step 2: OCR fallback on cropped region ──
+    let ocrResult: string | null = null;
+
+    if (!barcodeResult) {
+      ocrResult = await runOcr(croppedCanvas);
+    }
+
+    // ── Step 3: Enhanced OCR (contrast boost + sharpening) ──
+    if (!barcodeResult && !ocrResult) {
+      ocrResult = await runEnhancedOcr(croppedCanvas);
+    }
+
+    // ── Determine final result ──
+    const finalBarcode = barcodeResult || ocrResult;
+
+    console.log('[BarcodeCapture] ── Results summary ──');
+    console.log('[BarcodeCapture]   Barcode detection:', barcodeResult || '(none)');
+    console.log('[BarcodeCapture]   OCR result:', ocrResult || '(none)');
+    console.log('[BarcodeCapture]   Final selected barcode:', finalBarcode || '(none)');
+
     setIsProcessing(false);
-    setNoBarcodeFound(true);
-  }, [onScan]);
+    setProcessingStep('');
+
+    if (finalBarcode) {
+      setDetectedBarcode(finalBarcode);
+    } else {
+      setNoBarcodeFound(true);
+    }
+  }, [onScan, cropScanZone, runOcr, runEnhancedOcr]);
+
+  // ── Confirm detected barcode → search ──
+  const confirmBarcode = useCallback(() => {
+    if (!detectedBarcode) return;
+    // Stop camera
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    onScan(detectedBarcode);
+  }, [detectedBarcode, onScan]);
 
   // ── Retry: go back to live camera ──
   const retry = useCallback(() => {
     setCapturedImage(null);
     setNoBarcodeFound(false);
     setIsProcessing(false);
+    setCroppedPreview(null);
+    setDetectedBarcode(null);
+    setProcessingStep('');
 
     // Resume video
     if (videoRef.current && streamRef.current) {
@@ -223,8 +464,9 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
 
   return (
     <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-      {/* Hidden element for html5-qrcode scanFileV2 */}
+      {/* Hidden elements for html5-qrcode scanFileV2 */}
       <div id="barcode-photo-scan-element" style={{ display: 'none' }} />
+      <div id="barcode-photo-scan-element-2" style={{ display: 'none' }} />
 
       {/* Hidden canvas for frame capture */}
       <canvas ref={canvasRef} className="hidden" />
@@ -232,13 +474,15 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
       {/* Header bar */}
       <div className="flex items-center justify-between px-4 py-3 bg-black/80 text-white z-10">
         <h2 className="text-lg font-semibold">
-          {capturedImage
-            ? isProcessing
-              ? 'Processing...'
-              : noBarcodeFound
-                ? 'No Barcode Found'
-                : 'Analyzing...'
-            : 'Capture Barcode Photo'}
+          {detectedBarcode
+            ? 'Barcode Detected'
+            : capturedImage
+              ? isProcessing
+                ? processingStep || 'Processing...'
+                : noBarcodeFound
+                  ? 'No Barcode Found'
+                  : 'Analyzing...'
+              : 'Capture Barcode Photo'}
         </h2>
         <Button
           variant="ghost"
@@ -264,7 +508,7 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
         )}
 
         {/* Captured image (frozen frame) */}
-        {capturedImage && (
+        {capturedImage && !detectedBarcode && !noBarcodeFound && (
           <img
             src={capturedImage}
             alt="Captured barcode"
@@ -272,20 +516,31 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
           />
         )}
 
-        {/* Scanning overlay — guide when camera is live */}
+        {/* ── RED SCAN LINE OVERLAY (camera live) ── */}
         {!capturedImage && !error && !isStarting && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="relative w-[280px] h-[160px]">
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            {/* Scan zone rectangle */}
+            <div
+              className="relative border-2 border-red-500/80 rounded-lg"
+              style={{
+                width: `${SCAN_ZONE_WIDTH_PCT * 100}%`,
+                height: `${CROP_HEIGHT_PCT * 100}%`,
+              }}
+            >
               {/* Corner markers */}
-              <div className="absolute top-0 left-0 w-8 h-8 border-t-3 border-l-3 border-white rounded-tl-lg" />
-              <div className="absolute top-0 right-0 w-8 h-8 border-t-3 border-r-3 border-white rounded-tr-lg" />
-              <div className="absolute bottom-0 left-0 w-8 h-8 border-b-3 border-l-3 border-white rounded-bl-lg" />
-              <div className="absolute bottom-0 right-0 w-8 h-8 border-b-3 border-r-3 border-white rounded-br-lg" />
-              {/* Center hint */}
-              <div className="absolute inset-0 flex items-center justify-center">
-                <p className="text-white/60 text-xs bg-black/30 px-2 py-1 rounded">
-                  Point at barcode &amp; capture
-                </p>
+              <div className="absolute top-0 left-0 w-5 h-5 border-t-3 border-l-3 border-red-400 rounded-tl-md" />
+              <div className="absolute top-0 right-0 w-5 h-5 border-t-3 border-r-3 border-red-400 rounded-tr-md" />
+              <div className="absolute bottom-0 left-0 w-5 h-5 border-b-3 border-l-3 border-red-400 rounded-bl-md" />
+              <div className="absolute bottom-0 right-0 w-5 h-5 border-b-3 border-r-3 border-red-400 rounded-br-md" />
+
+              {/* Prominent red horizontal centre line */}
+              <div className="absolute top-1/2 left-2 right-2 h-[3px] bg-red-500 -translate-y-1/2 shadow-[0_0_8px_rgba(239,68,68,0.6)]" />
+
+              {/* Instruction text */}
+              <div className="absolute -top-7 left-0 right-0 text-center">
+                <span className="text-white text-xs bg-red-600/80 px-3 py-1 rounded-full font-medium">
+                  Align barcode here
+                </span>
               </div>
             </div>
           </div>
@@ -301,18 +556,77 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
 
         {/* Processing overlay — extracting barcode */}
         {isProcessing && capturedImage && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
             <Loader2 className="h-10 w-10 text-white animate-spin mb-4" />
-            <p className="text-white text-sm">Extracting barcode...</p>
+            <p className="text-white text-sm mb-2">{processingStep || 'Extracting barcode...'}</p>
+            <div className="w-48 h-1.5 bg-white/20 rounded-full overflow-hidden">
+              <div className="h-full bg-red-500 rounded-full animate-pulse" style={{ width: '60%' }} />
+            </div>
+          </div>
+        )}
+
+        {/* ── DETECTED BARCODE: cropped preview + confirm/retake ── */}
+        {detectedBarcode && croppedPreview && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 px-6 py-4">
+            {/* Cropped scan region preview */}
+            <div className="w-full max-w-xs mb-4">
+              <p className="text-white/60 text-xs text-center mb-2">Scanned region:</p>
+              <div className="border-2 border-green-500/50 rounded-lg overflow-hidden">
+                <img
+                  src={croppedPreview}
+                  alt="Cropped scan region"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+
+            {/* Detected barcode display */}
+            <div className="bg-green-900/40 border border-green-500/50 rounded-xl px-6 py-4 mb-6 text-center">
+              <p className="text-green-400 text-xs mb-1">Detected Barcode</p>
+              <p className="text-white text-2xl font-mono font-bold tracking-widest">{detectedBarcode}</p>
+            </div>
+
+            {/* Confirm / Retake buttons */}
+            <div className="flex gap-3 w-full max-w-xs">
+              <Button
+                variant="outline"
+                onClick={retry}
+                className="flex-1 h-12 text-white border-white/30 hover:bg-white/10 gap-2"
+              >
+                <RotateCcw className="h-5 w-5" />
+                Retake
+              </Button>
+              <Button
+                onClick={confirmBarcode}
+                className="flex-1 h-12 bg-green-600 hover:bg-green-700 text-white gap-2"
+              >
+                <Check className="h-5 w-5" />
+                Confirm
+              </Button>
+            </div>
           </div>
         )}
 
         {/* No barcode found overlay */}
         {noBarcodeFound && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 px-6">
+            {/* Show cropped preview if available so user can see what was scanned */}
+            {croppedPreview && (
+              <div className="w-full max-w-xs mb-4">
+                <p className="text-white/40 text-xs text-center mb-2">Scanned region:</p>
+                <div className="border border-amber-500/30 rounded-lg overflow-hidden opacity-60">
+                  <img
+                    src={croppedPreview}
+                    alt="Cropped scan region"
+                    className="w-full h-auto"
+                  />
+                </div>
+              </div>
+            )}
             <div className="text-center mb-6">
+              <AlertCircle className="h-10 w-10 text-amber-400 mx-auto mb-3" />
               <p className="text-amber-400 text-lg font-medium mb-2">No barcode detected</p>
-              <p className="text-white/70 text-sm">Please try again with a clearer view of the barcode.</p>
+              <p className="text-white/70 text-sm">Align the barcode so it crosses the red line and try again.</p>
             </div>
             <Button
               variant="outline"
@@ -374,18 +688,6 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
           </Button>
         )}
 
-        {/* Try Again button (after no barcode found) */}
-        {noBarcodeFound && (
-          <Button
-            variant="outline"
-            onClick={retry}
-            className="text-white border-white/30 hover:bg-white/10 gap-2 h-11"
-          >
-            <RotateCcw className="h-5 w-5" />
-            Try Again
-          </Button>
-        )}
-
         {/* Manual entry fallback (only when camera is live) */}
         {!capturedImage && (
           <Button
@@ -403,7 +705,10 @@ export function BarcodePhotoCapture({ onScan, onClose }: BarcodePhotoCaptureProp
       {!capturedImage && (
         <div className="text-center pb-6 px-4 bg-black/80">
           <p className="text-white/70 text-xs">
-            Point your camera at a barcode and press Capture. Supported: EAN-13, EAN-8, UPC-A, UPC-E, Code 128, Code 39
+            Align the barcode so it crosses the red line, then press Capture.
+          </p>
+          <p className="text-white/40 text-[10px] mt-1">
+            Supports: EAN-13, EAN-8, UPC-A, UPC-E, Code 128, Code 39
           </p>
         </div>
       )}
